@@ -1,0 +1,4 @@
+pydantic-settings
+Telethon
+httpx
+aiofiles

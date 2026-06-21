@@ -9,6 +9,8 @@ class _Settings(BaseSettings):
     API_HASH: str
     OWNER_ID: List[int] = []
 
+    CHUNK_SIZE_LIMIT: int = 2000 * 1024 * 1024
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,

@@ -2,12 +2,65 @@ import asyncio
 import os
 import secrets
 import shutil
+import time
 import urllib.parse
+from collections import deque
+
 import httpx
 import aiofiles
 
 from config import settings
 
+
+class ProgressTracker:
+    def __init__(self, total_size: int, already_downloaded: int = 0, window_seconds: float = 3.0):
+        self.total_size = total_size
+        self.downloaded = already_downloaded
+        self.window_seconds = window_seconds
+        self.history = deque()  # Stores tuples of (monotonic_timestamp, cumulative_bytes)
+        self.last_print_time = 0.0
+
+    def update(self, bytes_count: int):
+        self.downloaded += bytes_count
+        now = time.monotonic()
+        self.history.append((now, self.downloaded))
+
+        # Prune elements in history older than the sliding window limit
+        while self.history and (now - self.history[0][0]) > self.window_seconds:
+            self.history.popleft()
+
+    def get_recent_speed(self) -> float:
+        """Returns the recent average speed in bytes per second."""
+        if len(self.history) < 2:
+            return 0.0
+        first_time, first_bytes = self.history[0]
+        last_time, last_bytes = self.history[-1]
+        time_diff = last_time - first_time
+        if time_diff <= 0:
+            return 0.0
+        return (last_bytes - first_bytes) / time_diff
+
+    def display(self, force: bool = False):
+        """Prints a throttled progress bar to the terminal to avoid CPU overhead."""
+        now = time.monotonic()
+        # Throttles printing to a maximum of once every 0.3 seconds
+        if not force and (now - self.last_print_time) < 0.3:
+            return
+        self.last_print_time = now
+
+        speed_mb = self.get_recent_speed() / (1024 * 1024)
+        downloaded_mb = self.downloaded / (1024 * 1024)
+
+        if self.total_size > 0:
+            percentage = (self.downloaded / self.total_size) * 100
+            total_mb = self.total_size / (1024 * 1024)
+            print(
+                f"\r -> {percentage:6.2f}% | {downloaded_mb:8.2f} / {total_mb:8.2f} MB | "
+                f"Speed: {speed_mb:6.2f} MB/s",
+                end="", flush=True
+            )
+        else:
+            print(f"\r -> {downloaded_mb:8.2f} MB | Speed: {speed_mb:6.2f} MB/s", end="", flush=True)
 
 class AsyncDownloader:
     def __init__(self, url: str, temp_dir: str = "./downloads"):
@@ -62,8 +115,7 @@ class AsyncDownloader:
 
     async def download_chunk_with_range(self, part_filepath: str, start_byte: int, end_byte: int) -> int:
         """
-        Downloads a specific byte range. If the connection drops, it resumes from the
-        exact offset already written to disk.
+        Downloads a specific byte range with active progress and speed tracking.
         """
         buffer_size = 64 * 1024
 
@@ -75,7 +127,11 @@ class AsyncDownloader:
 
         current_start = start_byte + existing_bytes
         if current_start >= end_byte:
-            return existing_bytes  # Already fully downloaded
+            return existing_bytes
+
+        # Calculate total size expected to be fetched during this request session
+        total_to_fetch = (end_byte - start_byte) + 1
+        tracker = ProgressTracker(total_size=total_to_fetch, already_downloaded=existing_bytes)
 
         headers = {"Range": f"bytes={current_start}-{end_byte}"}
 
@@ -91,7 +147,16 @@ class AsyncDownloader:
                         async for chunk in response.aiter_bytes(chunk_size=buffer_size):
                             await f.write(chunk)
                             existing_bytes += len(chunk)
+
+                            # Update and display the progress
+                            tracker.update(len(chunk))
+                            tracker.display()
+
+                    # Force final print on successful completion to show 100%
+                    tracker.display(force=True)
+                    print()  # Print a clean newline
                     return existing_bytes
+
             except (httpx.HTTPError, OSError) as e:
                 print(f"[Downloader] Connection issue on attempt {attempt + 1}/{retries}: {e}")
                 if attempt == retries - 1:

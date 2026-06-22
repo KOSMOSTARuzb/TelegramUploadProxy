@@ -172,6 +172,7 @@ async def mock_telegram_upload(file_path: str, part_index: int):
     await asyncio.sleep(simulated_upload_time)
     print(f"[Uploader] Successfully uploaded Part {part_index}!")
     try:
+        assert False
         os.remove(file_path)
         print(f"[Uploader] Cleaned up: {file_path}")
     except OSError as e:
@@ -252,9 +253,10 @@ async def run_pipeline(url: str):
                 part_index += 1
 
         else:
-            # --- PATH B: NO RANGE SUPPORT / UNKNOWN SIZE ---
+            # TODO:  --- PATH B: NO RANGE SUPPORT / UNKNOWN SIZE ---
             # Fall back to continuous streaming (subject to backpressure timeouts)
             print("[Pipeline] Server does not support Range requests. Streaming continuously...")
+            assert False
             # (Continuous streaming loop code from previous response goes here...)
             # [Omitted here for brevity, but it remains as the fallback route]
 

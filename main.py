@@ -1,14 +1,16 @@
+import asyncio
+
 from telethon import TelegramClient
 
 from config import settings
+from downloader import run_pipeline
 
 bot = TelegramClient(session='anony', api_id=settings.API_ID, api_hash=settings.API_HASH).start(bot_token=settings.BOT_TOKEN)
 
 async def main():
-    def callback(current, total):
-        print(f'Uploaded {current} out of {total} bytes: {current / total * 100:.2f}%')
-    response = await bot.send_file(5582904747, 'file', progress_callback=callback)
-    print(response)
+    # Test with a known file host. Most fast hosts support Range Requests.
+    test_url = "http://ipv4.download.thinkbroadband.com/5GB.zip"
+    asyncio.run(run_pipeline(bot, test_url, settings.OWNER_ID[0]))
 
 with bot:
     bot.loop.run_until_complete(main())

@@ -183,11 +183,11 @@ async def mock_telegram_upload(file_path: str, part_index: int):
 
 # --- Pipeline Coordination with Range-Support Intelligence ---
 # --- Real Pipeline Coordination ---
-async def run_pipeline(bot: TelegramClient, url: str, api_id: int, api_hash: str, bot_token: str, chat_id: str | int):
+async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
     downloader = AsyncDownloader(url)
 
     # Initialize and start our real Telethon uploader
-    uploader = TelegramUploader(bot, settings.OWNER_ID[0])
+    uploader = TelegramUploader(bot, target_chat)
 
     filename, total_size, supports_ranges = await downloader.inspect_server()
 
@@ -360,9 +360,3 @@ class TelegramUploader:
                 await asyncio.sleep(5.0)
 
         return False
-
-
-if __name__ == "__main__":
-    # Test with a known file host. Most fast hosts support Range Requests.
-    test_url = "http://ipv4.download.thinkbroadband.com/5GB.zip"
-    asyncio.run(run_pipeline(test_url))

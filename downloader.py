@@ -8,6 +8,8 @@ from collections import deque
 
 import httpx
 import aiofiles
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 
 from config import settings
 
@@ -180,11 +182,16 @@ async def mock_telegram_upload(file_path: str, part_index: int):
 
 
 # --- Pipeline Coordination with Range-Support Intelligence ---
-async def run_pipeline(url: str):
+# --- Real Pipeline Coordination ---
+async def run_pipeline(bot: TelegramClient, url: str, api_id: int, api_hash: str, bot_token: str, chat_id: str | int):
     downloader = AsyncDownloader(url)
+
+    # Initialize and start our real Telethon uploader
+    uploader = TelegramUploader(bot, settings.OWNER_ID[0])
+
     filename, total_size, supports_ranges = await downloader.inspect_server()
 
-    print(f"Starting pipeline for: {filename}")
+    print(f"\nStarting pipeline for: {filename}")
     print(f"Total Size: {f'{total_size / (1024 * 1024):.2f} MB' if total_size else 'Unknown'}")
     print(f"Server Supports Range Requests: {supports_ranges}")
     print(f"Session ID: {downloader.session_id}\n" + "-" * 50)
@@ -216,31 +223,43 @@ async def run_pipeline(url: str):
                 )
                 total_bytes_written += bytes_downloaded
 
-                # Handle metadata inclusion on the final part
-                if is_last_part:
-                    if part_index == 1:
-                        # Single-part file: Rename to original so user can use it immediately without merging
-                        final_path = os.path.join(downloader.temp_dir, filename)
-                        os.rename(part_filepath, final_path)
-                        if active_upload_task:
-                            await active_upload_task
-                        active_upload_task = asyncio.create_task(mock_telegram_upload(final_path, part_index))
-                        break
-                    else:
-                        # Multi-part: Append metadata footer
-                        metadata = (
-                            f'{{"filename": "{filename}", '
-                            f'"session_id": "{downloader.session_id}", '
-                            f'"total_parts": {part_index}}}'
-                        )
-                        metadata_bytes = metadata.encode("utf-8")
-                        metadata_len = len(metadata_bytes)
+                # Prepare the metadata caption for user readability on Telegram
+                if is_last_part and part_index == 1:
+                    # Case 1: Single-part file. No merging needed.
+                    final_path = os.path.join(downloader.temp_dir, filename)
+                    os.rename(part_filepath, final_path)
 
-                        async with aiofiles.open(part_filepath, "ab") as f:
-                            await f.write(metadata_bytes)
-                            await f.write(metadata_len.to_bytes(4, byteorder="big"))
-                        print(f"[Pipeline] Appended metadata to final Part {part_index}")
-                        # TODO: What if the last filesize exceeds the limit only after adding the metadata and 4-bit metadata metadata
+                    caption = (
+                        f"📁 **File:** `{filename}`\n"
+                        f"📊 **Size:** {total_bytes_written / (1024 * 1024):.2f} MB\n"
+                        f"ℹ️ _Single file - ready to open._"
+                    )
+
+                    if active_upload_task:
+                        await active_upload_task
+                    active_upload_task = asyncio.create_task(
+                        uploader.upload_file(final_path, caption, part_index)
+                    )
+                    break
+                else:
+                    # Case 2: Multi-part file.
+                    caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
+
+                if is_last_part:
+                    # Append metadata to the end of the final part
+                    metadata = (
+                        f'{{"filename": "{filename}", '
+                        f'"session_id": "{downloader.session_id}", '
+                        f'"total_parts": {part_index}}}'
+                    )
+                    metadata_bytes = metadata.encode("utf-8")
+                    metadata_len = len(metadata_bytes)
+
+                    async with aiofiles.open(part_filepath, "ab") as f:
+                        await f.write(metadata_bytes)
+                        await f.write(metadata_len.to_bytes(4, byteorder="big"))
+                    print(f"[Pipeline] Appended metadata to final Part {part_index}")
+                    # TODO: What if the last filesize exceeds the limit only after adding the metadata and 4-bit metadata metadata
 
                 # Ensure previous upload is finished before scheduling this one
                 if active_upload_task:
@@ -248,7 +267,9 @@ async def run_pipeline(url: str):
                     await active_upload_task
 
                 # Trigger next upload in background
-                active_upload_task = asyncio.create_task(mock_telegram_upload(part_filepath, part_index))
+                active_upload_task = asyncio.create_task(
+                    uploader.upload_file(part_filepath, caption, part_index)
+                )
 
                 part_index += 1
 
@@ -260,6 +281,7 @@ async def run_pipeline(url: str):
             # (Continuous streaming loop code from previous response goes here...)
             # [Omitted here for brevity, but it remains as the fallback route]
 
+        # Wait for the very last part to finish uploading before shutting down
         if active_upload_task:
             await active_upload_task
 
@@ -270,6 +292,74 @@ async def run_pipeline(url: str):
         print(f"\n[Pipeline Error] An error occurred: {e}")
     finally:
         await downloader.close()
+
+
+class TelegramUploader:
+    def __init__(self, bot: TelegramClient, target_chat: str | int):
+        self.target_chat = target_chat
+        self.bot = bot
+
+    async def upload_file(self, file_path: str, caption: str, part_index: int) -> bool:
+        """
+        Uploads a local chunk/file to the target Telegram chat with retry logic for rate limits.
+        """
+        if not os.path.exists(file_path):
+            print(f"[Uploader] Error: File {file_path} not found.")
+            return False
+
+        file_size = os.path.getsize(file_path)
+        file_name = os.path.basename(file_path)
+
+        # Initialize the same ProgressTracker we used for downloading
+        # For uploads, we specify a slightly larger window (5s) to smooth out MTProto upload bursts
+        tracker = ProgressTracker(total_size=file_size, window_seconds=5.0)
+
+        print(f"[Uploader] Starting upload of Part {part_index} ({file_name})...")
+
+        # Define the callback that Telethon calls periodically during upload
+        def progress_callback(current_bytes, total_bytes):
+            delta = current_bytes - tracker.downloaded
+            tracker.update(delta)
+            tracker.display()
+
+        # Retry loop to handle FloodWaitError / network issues
+        retries = 5
+        for attempt in range(retries):
+            try:
+                # force_document=True ensures files are sent as raw binaries (not compressed media)
+                await self.bot.send_file(
+                    entity=self.target_chat,
+                    file=file_path,
+                    caption=caption,
+                    force_document=True,
+                    progress_callback=progress_callback
+                )
+
+                tracker.display(force=True)
+                print(f"\n[Uploader] Successfully uploaded Part {part_index}!")
+
+                # Immediately clean up the disk space
+                try:
+                    os.remove(file_path)
+                    print(f"[Uploader] Cleaned up local file: {file_path}")
+                except OSError as e:
+                    print(f"[Uploader] Warning: Could not delete {file_path}: {e}")
+
+                return True
+
+            except FloodWaitError as e:
+                # Telegram-enforced rate limit protection
+                print(
+                    f"\n[Uploader] Rate limit hit! Sleeping for {e.seconds} seconds on attempt {attempt + 1}/{retries}...")
+                await asyncio.sleep(e.seconds)
+
+            except Exception as e:
+                print(f"\n[Uploader] Error during upload on attempt {attempt + 1}/{retries}: {e}")
+                if attempt == retries - 1:
+                    raise
+                await asyncio.sleep(5.0)
+
+        return False
 
 
 if __name__ == "__main__":

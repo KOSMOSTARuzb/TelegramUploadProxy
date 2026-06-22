@@ -85,7 +85,9 @@ class AsyncDownloader:
 
         try:
             # 1. Get metadata via HEAD request
+            print('sending req.')
             response = await self.client.head(self.url)
+            print('got req.')
             content_disp = response.headers.get("content-disposition", "")
             if "filename=" in content_disp:
                 parts = content_disp.split("filename=")
@@ -103,9 +105,9 @@ class AsyncDownloader:
             # 2. Actively test Range request support (reliable check)
             # We request just the first byte. If the server returns 206, it supports ranges.
             range_test_headers = {"Range": "bytes=0-10"}
-            range_response = await self.client.get(self.url, headers=range_test_headers)
-            if range_response.status_code == 206:
-                supports_ranges = True
+            async with self.client.stream("GET", self.url, headers=range_test_headers) as range_response:
+                if range_response.status_code == 206:
+                    supports_ranges = True
 
         except Exception as e:
             print(f"[Downloader] Metadata inspection encountered an issue: {e}. Falling back to defaults.")
@@ -174,7 +176,7 @@ async def mock_telegram_upload(file_path: str, part_index: int):
     await asyncio.sleep(simulated_upload_time)
     print(f"[Uploader] Successfully uploaded Part {part_index}!")
     try:
-        assert False
+        raise
         os.remove(file_path)
         print(f"[Uploader] Cleaned up: {file_path}")
     except OSError as e:
@@ -274,12 +276,98 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                 part_index += 1
 
         else:
-            # TODO:  --- PATH B: NO RANGE SUPPORT / UNKNOWN SIZE ---
-            # Fall back to continuous streaming (subject to backpressure timeouts)
-            print("[Pipeline] Server does not support Range requests. Streaming continuously...")
-            assert False
-            # (Continuous streaming loop code from previous response goes here...)
-            # [Omitted here for brevity, but it remains as the fallback route]
+            # --- PATH B: NO RANGE SUPPORT / UNKNOWN SIZE ---
+            print("[Pipeline] Server does not support Range requests or size is unknown. Streaming continuously...")
+            # Start a single continuous streaming request
+            async with downloader.client.stream("GET", url) as response:
+                response.raise_for_status()
+                buffer_size = 64 * 1024
+                bytes_written_this_chunk = 0
+                part_filepath = os.path.join(downloader.temp_dir,
+                                             f"{filename}.{downloader.session_id}.kpart{part_index}")
+                # Open the first chunk file
+                f_descriptor = await aiofiles.open(part_filepath, "wb")
+                tracker = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT, already_downloaded=0)
+                try:
+                    async for chunk in response.aiter_bytes(chunk_size=buffer_size):
+                        await f_descriptor.write(chunk)
+                        bytes_written_this_chunk += len(chunk)
+                        total_bytes_written += len(chunk)
+                        tracker.update(len(chunk))
+                        tracker.display()
+                        # Once we reach the chunk limit, rotate to the next part
+                        if bytes_written_this_chunk >= settings.CHUNK_SIZE_LIMIT:
+                            tracker.display(force=True)
+                            print(f"\n[Pipeline] Reached limit for Part {part_index}. Rotating file...")
+                            # Close current chunk
+                            await f_descriptor.close()
+                            # Enforce the upload queue constraint of 1
+                            if active_upload_task:
+                                print(
+                                    f"[Pipeline] Waiting for Part {part_index - 1} upload to finish before queuing Part {part_index}...")
+
+                                # Downloading is temporarily paused here, causing TCP backpressure
+                                await active_upload_task
+                            # Queue upload for the completed part in the background
+                            caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
+                            active_upload_task = asyncio.create_task(
+                                uploader.upload_file(part_filepath, caption, part_index)
+                            )
+                            # Prepare for the next part
+                            part_index += 1
+                            bytes_written_this_chunk = 0
+                            part_filepath = os.path.join(downloader.temp_dir,
+                                                         f"{filename}.{downloader.session_id}.kpart{part_index}")
+                            # Open new chunk file and reset progress tracker
+                            f_descriptor = await aiofiles.open(part_filepath, "wb")
+                            tracker = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT, already_downloaded=0)
+
+                finally:
+                    # Cleanly close the active file descriptor under any circumstances
+                    await f_descriptor.close()
+                # Handle the final chunk after the stream hits EOF
+                if bytes_written_this_chunk > 0:
+                    tracker.display(force=True)
+                    print(
+                        f"\n[Pipeline] Stream EOF reached. Final Part {part_index} size: {bytes_written_this_chunk / (1024 * 1024):.2f} MB")
+                    if part_index == 1:
+                        # Single-part file: Rename to original and upload directly (no metadata)
+                        final_path = os.path.join(downloader.temp_dir, filename)
+                        os.rename(part_filepath, final_path)
+                        caption = (
+                            f"📁 **File:** `{filename}`\n"
+                            f"📊 **Size:** {total_bytes_written / (1024 * 1024):.2f} MB\n"
+                            f"ℹ️ _Single file - ready to open._"
+                        )
+                        if active_upload_task:
+                            await active_upload_task
+                        active_upload_task = asyncio.create_task(
+                            uploader.upload_file(final_path, caption, part_index)
+                        )
+                    else:
+                        # Multi-part file: Append metadata footer to the final part
+                        metadata = (
+                            f'{{"filename": "{filename}", '
+                            f'"session_id": "{downloader.session_id}", '
+                            f'"total_parts": {part_index}}}'
+                        )
+                        metadata_bytes = metadata.encode("utf-8")
+                        metadata_len = len(metadata_bytes)
+                        async with aiofiles.open(part_filepath, "ab") as f_meta:
+                            await f_meta.write(metadata_bytes)
+                            await f_meta.write(metadata_len.to_bytes(4, byteorder="big"))
+                        print(f"[Pipeline] Appended metadata to final Part {part_index}")
+                        if active_upload_task:
+                            print(f"[Pipeline] Waiting for Part {part_index - 1} upload to complete...")
+                            await active_upload_task
+                        caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
+                        active_upload_task = asyncio.create_task(
+                            uploader.upload_file(part_filepath, caption, part_index)
+                        )
+                else:
+                    # If EOF was reached exactly on a boundary, we might have an empty file left on disk
+                    if os.path.exists(part_filepath):
+                        os.remove(part_filepath)
 
         # Wait for the very last part to finish uploading before shutting down
         if active_upload_task:

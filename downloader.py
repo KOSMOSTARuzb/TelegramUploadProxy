@@ -4,6 +4,7 @@ import secrets
 import shutil
 import time
 import urllib.parse
+from asyncio import Task
 from collections import deque
 
 import httpx
@@ -198,9 +199,45 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
     print(f"Server Supports Range Requests: {supports_ranges}")
     print(f"Session ID: {downloader.session_id}\n" + "-" * 50)
 
-    active_upload_task = None
+    active_upload_task: Task | None = None
     part_index = 1
     total_bytes_written = 0
+
+    # --- Helper functions to reduce repetition ---
+    async def append_metadata(filepath: str, idx: int):
+        """Encodes and appends metadata to the end of the final part file."""
+        metadata = (
+            f'{{"filename": "{filename}", '
+            f'"session_id": "{downloader.session_id}", '
+            f'"total_parts": {idx}}}'
+        )
+        metadata_bytes = metadata.encode("utf-8")
+        metadata_len = len(metadata_bytes)
+        async with aiofiles.open(filepath, "ab") as f:
+            await f.write(metadata_bytes)
+            await f.write(metadata_len.to_bytes(4, byteorder="big"))
+        print(f"[Pipeline] Appended metadata to final Part {idx}")
+
+    def handle_single_part(_part_filepath: str):
+        """Renames a single-part file back to its original name and returns the path and caption."""
+        _final_path = os.path.join(downloader.temp_dir, filename)
+        os.rename(_part_filepath, _final_path)
+        _caption = (
+            f"📁 **File:** `{filename}`\n"
+            f"📊 **Size:** {total_bytes_written / (1024 * 1024):.2f} MB\n"
+            f"ℹ️ _Single file - ready to open._"
+        )
+        return _final_path, _caption
+
+    async def queue_upload(filepath: str, _caption: str, idx: int):
+        """Enforces upload limit of 1; awaits active uploads before starting the next."""
+        nonlocal active_upload_task
+        if active_upload_task:
+            print(f"[Pipeline] Waiting for Part {idx - 1} upload to complete...")
+            await active_upload_task
+        active_upload_task = asyncio.create_task(
+            uploader.upload_file(filepath, _caption, idx)
+        )
 
     try:
         if supports_ranges and total_size:
@@ -228,51 +265,18 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                 # Prepare the metadata caption for user readability on Telegram
                 if is_last_part and part_index == 1:
                     # Case 1: Single-part file. No merging needed.
-                    final_path = os.path.join(downloader.temp_dir, filename)
-                    os.rename(part_filepath, final_path)
-
-                    caption = (
-                        f"📁 **File:** `{filename}`\n"
-                        f"📊 **Size:** {total_bytes_written / (1024 * 1024):.2f} MB\n"
-                        f"ℹ️ _Single file - ready to open._"
-                    )
-
-                    if active_upload_task:
-                        await active_upload_task
-                    active_upload_task = asyncio.create_task(
-                        uploader.upload_file(final_path, caption, part_index)
-                    )
+                    final_path, caption = handle_single_part(part_filepath)
+                    await queue_upload(final_path, caption, part_index)
                     break
                 else:
                     # Case 2: Multi-part file.
                     caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
 
                 if is_last_part:
-                    # Append metadata to the end of the final part
-                    metadata = (
-                        f'{{"filename": "{filename}", '
-                        f'"session_id": "{downloader.session_id}", '
-                        f'"total_parts": {part_index}}}'
-                    )
-                    metadata_bytes = metadata.encode("utf-8")
-                    metadata_len = len(metadata_bytes)
-
-                    async with aiofiles.open(part_filepath, "ab") as f:
-                        await f.write(metadata_bytes)
-                        await f.write(metadata_len.to_bytes(4, byteorder="big"))
-                    print(f"[Pipeline] Appended metadata to final Part {part_index}")
+                    await append_metadata(part_filepath, part_index)
                     # TODO: What if the last filesize exceeds the limit only after adding the metadata and 4-bit metadata metadata
 
-                # Ensure previous upload is finished before scheduling this one
-                if active_upload_task:
-                    print(f"[Pipeline] Waiting for Part {part_index - 1} upload to complete...")
-                    await active_upload_task
-
-                # Trigger next upload in background
-                active_upload_task = asyncio.create_task(
-                    uploader.upload_file(part_filepath, caption, part_index)
-                )
-
+                await queue_upload(part_filepath, caption, part_index)
                 part_index += 1
 
         else:
@@ -306,13 +310,10 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                                 print(
                                     f"[Pipeline] Waiting for Part {part_index - 1} upload to finish before queuing Part {part_index}...")
 
-                                # Downloading is temporarily paused here, causing TCP backpressure
-                                await active_upload_task
-                            # Queue upload for the completed part in the background
+                            # Queue upload (the await inside queue_upload handles the TCP backpressure pause)
                             caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
-                            active_upload_task = asyncio.create_task(
-                                uploader.upload_file(part_filepath, caption, part_index)
-                            )
+                            await queue_upload(part_filepath, caption, part_index)
+
                             # Prepare for the next part
                             part_index += 1
                             bytes_written_this_chunk = 0
@@ -325,45 +326,20 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                 finally:
                     # Cleanly close the active file descriptor under any circumstances
                     await f_descriptor.close()
+
                 # Handle the final chunk after the stream hits EOF
                 if bytes_written_this_chunk > 0:
                     tracker.display(force=True)
                     print(
                         f"\n[Pipeline] Stream EOF reached. Final Part {part_index} size: {bytes_written_this_chunk / (1024 * 1024):.2f} MB")
+
                     if part_index == 1:
-                        # Single-part file: Rename to original and upload directly (no metadata)
-                        final_path = os.path.join(downloader.temp_dir, filename)
-                        os.rename(part_filepath, final_path)
-                        caption = (
-                            f"📁 **File:** `{filename}`\n"
-                            f"📊 **Size:** {total_bytes_written / (1024 * 1024):.2f} MB\n"
-                            f"ℹ️ _Single file - ready to open._"
-                        )
-                        if active_upload_task:
-                            await active_upload_task
-                        active_upload_task = asyncio.create_task(
-                            uploader.upload_file(final_path, caption, part_index)
-                        )
+                        final_path, caption = handle_single_part(part_filepath)
+                        await queue_upload(final_path, caption, part_index)
                     else:
-                        # Multi-part file: Append metadata footer to the final part
-                        metadata = (
-                            f'{{"filename": "{filename}", '
-                            f'"session_id": "{downloader.session_id}", '
-                            f'"total_parts": {part_index}}}'
-                        )
-                        metadata_bytes = metadata.encode("utf-8")
-                        metadata_len = len(metadata_bytes)
-                        async with aiofiles.open(part_filepath, "ab") as f_meta:
-                            await f_meta.write(metadata_bytes)
-                            await f_meta.write(metadata_len.to_bytes(4, byteorder="big"))
-                        print(f"[Pipeline] Appended metadata to final Part {part_index}")
-                        if active_upload_task:
-                            print(f"[Pipeline] Waiting for Part {part_index - 1} upload to complete...")
-                            await active_upload_task
+                        await append_metadata(part_filepath, part_index)
                         caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
-                        active_upload_task = asyncio.create_task(
-                            uploader.upload_file(part_filepath, caption, part_index)
-                        )
+                        await queue_upload(part_filepath, caption, part_index)
                 else:
                     # If EOF was reached exactly on a boundary, we might have an empty file left on disk
                     if os.path.exists(part_filepath):
@@ -373,8 +349,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
         if active_upload_task:
             await active_upload_task
 
-        print(
-            f"\n[Pipeline] Complete! Processed {total_bytes_written / (1024 * 1024):.2f} MB in {part_index if supports_ranges and total_size else part_index} part(s).")
+        print(f"\n[Pipeline] Complete! Processed {total_bytes_written / (1024 * 1024):.2f} MB in {part_index} part(s).")
 
     except Exception as e:
         print(f"\n[Pipeline Error] An error occurred: {e}")

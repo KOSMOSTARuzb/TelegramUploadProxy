@@ -224,19 +224,61 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
     total_bytes_written = 0
 
     # --- Helper functions to reduce repetition ---
-    async def append_metadata(filepath: str, idx: int):
-        """Encodes and appends metadata to the end of the final part file."""
-        metadata = (
+    async def append_metadata(filepath: str, idx: int) -> tuple[str, int]:
+        """
+        Encodes and appends metadata to the end of the final part file.
+        If appending the metadata would cause the file size to exceed settings.CHUNK_SIZE_LIMIT,
+        it uploads the current file as-is and creates a new metadata-only final part.
+        Returns a tuple of (filepath_to_upload, index_to_upload).
+        """
+        # Calculate estimated metadata overhead
+        metadata_str = (
             f'{{"filename": "{filename}", '
             f'"session_id": "{downloader.session_id}", '
             f'"total_parts": {idx}}}'
         )
-        metadata_bytes = metadata.encode("utf-8")
+        metadata_bytes = metadata_str.encode("utf-8")
         metadata_len = len(metadata_bytes)
-        async with aiofiles.open(filepath, "ab") as f:
-            await f.write(metadata_bytes)
-            await f.write(metadata_len.to_bytes(4, byteorder="big"))
-        print(f"[Pipeline] Appended metadata to final Part {idx}")
+        total_overhead = metadata_len + 4
+
+        current_size = os.path.getsize(filepath)
+
+        if current_size + total_overhead <= settings.CHUNK_SIZE_LIMIT:
+            # Safe to append to the current file
+            async with aiofiles.open(filepath, "ab") as f:
+                await f.write(metadata_bytes)
+                await f.write(metadata_len.to_bytes(4, byteorder="big"))
+            print(f"[Pipeline] Appended metadata to final Part {idx}")
+            return filepath, idx
+        else:
+            # Overflow risk! Upload current file as a normal full part first,
+            # then create a new metadata-only final part.
+            print(f"[Pipeline] Part {idx} is too close to limit ({current_size} bytes). "
+                  f"Creating extra metadata-only Part {idx + 1}...")
+
+            # 1. Queue the current file (without metadata)
+            current_caption = f"📦 Part {idx} of `{filename}`\nSession ID: `{downloader.session_id}`"
+            await queue_upload(filepath, current_caption, idx)
+
+            # 2. Build the metadata-only final part (idx + 1)
+            new_idx = idx + 1
+            new_part_filename = f"{filename}.{downloader.session_id}.kpart{new_idx}"
+            new_filepath = os.path.join(downloader.temp_dir, new_part_filename)
+
+            new_metadata_str = (
+                f'{{"filename": "{filename}", '
+                f'"session_id": "{downloader.session_id}", '
+                f'"total_parts": {new_idx}}}'
+            )
+            new_metadata_bytes = new_metadata_str.encode("utf-8")
+            new_metadata_len = len(new_metadata_bytes)
+
+            async with aiofiles.open(new_filepath, "wb") as f:
+                await f.write(new_metadata_bytes)
+                await f.write(new_metadata_len.to_bytes(4, byteorder="big"))
+
+            print(f"[Pipeline] Created extra metadata-only final Part {new_idx}")
+            return new_filepath, new_idx
 
     def handle_single_part(_part_filepath: str):
         """Renames a single-part file back to its original name and returns the path and caption."""
@@ -293,10 +335,12 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                     caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
 
                 if is_last_part:
-                    await append_metadata(part_filepath, part_index)
-                    # TODO: What if the last filesize exceeds the limit only after adding the metadata and 4-bit metadata metadata
-
-                await queue_upload(part_filepath, caption, part_index)
+                    # Dynamic check and safe append
+                    upload_filepath, upload_idx = await append_metadata(part_filepath, part_index)
+                    caption = f"📦 Part {upload_idx} of `{filename}`\nSession ID: `{downloader.session_id}`"
+                    await queue_upload(upload_filepath, caption, upload_idx)
+                else:
+                    await queue_upload(part_filepath, caption, part_index)
                 part_index += 1
 
         else:
@@ -359,9 +403,10 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                         final_path, caption = handle_single_part(part_filepath)
                         await queue_upload(final_path, caption, part_index)
                     else:
-                        await append_metadata(part_filepath, part_index)
-                        caption = f"📦 Part {part_index} of `{filename}`\nSession ID: `{downloader.session_id}`"
-                        await queue_upload(part_filepath, caption, part_index)
+                        # Dynamic check and safe append
+                        upload_filepath, upload_idx = await append_metadata(part_filepath, part_index)
+                        caption = f"📦 Part {upload_idx} of `{filename}`\nSession ID: `{downloader.session_id}`"
+                        await queue_upload(upload_filepath, caption, upload_idx)
                 else:
                     # If EOF was reached exactly on a boundary, we might have an empty file left on disk
                     if os.path.exists(part_filepath):

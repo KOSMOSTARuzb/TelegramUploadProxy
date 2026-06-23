@@ -1,32 +1,35 @@
 import asyncio
 import os
 import secrets
-import shutil
 import time
 import urllib.parse
 from asyncio import Task
 from collections import deque
+from typing import Optional
 
-import httpx
 import aiofiles
+import httpx
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
+from typing_inspection.typing_objects import NoneType
 
 from config import settings
 
 
 class ProgressTracker:
-    def __init__(self, total_size: int, already_downloaded: int = 0, window_seconds: float = 3.0):
+    """Handles a single stream of progress (either upload or download)."""
+
+    def __init__(self, total_size: Optional[int] = None, window_seconds: float = 3.0):
         self.total_size = total_size
-        self.downloaded = already_downloaded
+        self.processed = 0
         self.window_seconds = window_seconds
-        self.history = deque()  # Stores tuples of (monotonic_timestamp, cumulative_bytes)
+        self.history = deque()
         self.last_print_time = 0.0
 
     def update(self, bytes_count: int):
-        self.downloaded += bytes_count
+        self.processed += bytes_count
         now = time.monotonic()
-        self.history.append((now, self.downloaded))
+        self.history.append((now, self.processed))
 
         # Prune elements in history older than the sliding window limit
         while self.history and (now - self.history[0][0]) > self.window_seconds:
@@ -36,12 +39,19 @@ class ProgressTracker:
         """Returns the recent average speed in bytes per second."""
         if len(self.history) < 2:
             return 0.0
-        first_time, first_bytes = self.history[0]
-        last_time, last_bytes = self.history[-1]
-        time_diff = last_time - first_time
+        time_diff = self.history[-1][0] - self.history[0][0]
         if time_diff <= 0:
             return 0.0
-        return (last_bytes - first_bytes) / time_diff
+        return (self.history[-1][1] - self.history[0][1]) / time_diff
+
+
+class ProgressManager:
+    """Manages both Upload and Download trackers simultaneously."""
+
+    def __init__(self, download_size: Optional[int] = None, upload_size: Optional[int] = None):
+        self.download = ProgressTracker(download_size) if download_size is not None else None
+        self.upload = ProgressTracker(upload_size) if upload_size is not None else None
+        self.last_print_time = 0.0
 
     def display(self, force: bool = False):
         """Prints a throttled progress bar to the terminal to avoid CPU overhead."""
@@ -51,26 +61,33 @@ class ProgressTracker:
             return
         self.last_print_time = now
 
-        speed_mb = self.get_recent_speed() / (1024 * 1024)
-        downloaded_mb = self.downloaded / (1024 * 1024)
+        output = "\r"
 
-        if self.total_size > 0:
-            percentage = (self.downloaded / self.total_size) * 100
-            total_mb = self.total_size / (1024 * 1024)
-            print(
-                f"\r -> {percentage:6.2f}% | {downloaded_mb:8.2f} / {total_mb:8.2f} MB | "
-                f"Speed: {speed_mb:6.2f} MB/s",
-                end="", flush=True
-            )
-        else:
-            print(f"\r -> {downloaded_mb:8.2f} MB | Speed: {speed_mb:6.2f} MB/s", end="", flush=True)
+        # Helper to format tracker output
+        def format_stream(tracker, label):
+            speed = tracker.get_recent_speed() / (1024 * 1024)
+            mb = tracker.processed / (1024 * 1024)
+            if tracker.total_size and tracker.total_size > 0:
+                pct = (tracker.processed / tracker.total_size) * 100
+                total = tracker.total_size / (1024 * 1024)
+                return f"{label}: {pct:5.1f}% | {mb:7.1f}/{total:7.1f} MB | {speed:6.1f} MB/s"
+            return f"{label}: {mb:7.1f} MB | {speed:6.1f} MB/s"
+
+        parts = []
+        if self.download:
+            parts.append(format_stream(self.download, "DL"))
+        if self.upload:
+            parts.append(format_stream(self.upload, "UL"))
+
+        print(f"\r{' | '.join(parts)}", end="", flush=True)
 
 class AsyncDownloader:
-    def __init__(self, url: str, temp_dir: str = "./downloads"):
+    def __init__(self, url: str, speed_manager: ProgressManager, temp_dir: str = "./downloads"):
         self.url = url
         self.temp_dir = temp_dir
         self.client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
         self.session_id = secrets.token_hex(6)  # 12-character ID
+        self.speed_manager = speed_manager
         os.makedirs(self.temp_dir, exist_ok=True)
 
     async def close(self):
@@ -118,7 +135,7 @@ class AsyncDownloader:
 
         return filename, total_size, supports_ranges
 
-    async def download_chunk_with_range(self, part_filepath: str, start_byte: int, end_byte: int) -> int:
+    async def download_chunk_with_range(self, part_filepath: str, start_byte: int, end_byte: int) -> int | None:
         """
         Downloads a specific byte range with active progress and speed tracking.
         """
@@ -136,7 +153,8 @@ class AsyncDownloader:
 
         # Calculate total size expected to be fetched during this request session
         total_to_fetch = (end_byte - start_byte) + 1
-        tracker = ProgressTracker(total_size=total_to_fetch, already_downloaded=existing_bytes)
+        self.speed_manager.download = ProgressTracker(total_size=total_to_fetch)
+        self.speed_manager.download.update(existing_bytes)
 
         headers = {"Range": f"bytes={current_start}-{end_byte}"}
 
@@ -154,11 +172,11 @@ class AsyncDownloader:
                             existing_bytes += len(chunk)
 
                             # Update and display the progress
-                            tracker.update(len(chunk))
-                            tracker.display()
+                            self.speed_manager.download.update(len(chunk))
+                            self.speed_manager.display()
 
                     # Force final print on successful completion to show 100%
-                    tracker.display(force=True)
+                    self.speed_manager.display(force=True)
                     print()  # Print a clean newline
                     return existing_bytes
 
@@ -187,10 +205,11 @@ async def mock_telegram_upload(file_path: str, part_index: int):
 # --- Pipeline Coordination with Range-Support Intelligence ---
 # --- Real Pipeline Coordination ---
 async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
-    downloader = AsyncDownloader(url)
+    speed_manager = ProgressManager()
+    downloader = AsyncDownloader(url, speed_manager=speed_manager)
 
     # Initialize and start our real Telethon uploader
-    uploader = TelegramUploader(bot, target_chat)
+    uploader = TelegramUploader(bot, speed_manager=speed_manager, target_chat=target_chat)
 
     filename, total_size, supports_ranges = await downloader.inspect_server()
 
@@ -291,17 +310,17 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                                              f"{filename}.{downloader.session_id}.kpart{part_index}")
                 # Open the first chunk file
                 f_descriptor = await aiofiles.open(part_filepath, "wb")
-                tracker = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT, already_downloaded=0)
+                speed_manager.download = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT)
                 try:
                     async for chunk in response.aiter_bytes(chunk_size=buffer_size):
                         await f_descriptor.write(chunk)
                         bytes_written_this_chunk += len(chunk)
                         total_bytes_written += len(chunk)
-                        tracker.update(len(chunk))
-                        tracker.display()
+                        speed_manager.download.update(len(chunk))
+                        speed_manager.display()
                         # Once we reach the chunk limit, rotate to the next part
                         if bytes_written_this_chunk >= settings.CHUNK_SIZE_LIMIT:
-                            tracker.display(force=True)
+                            speed_manager.display(force=True)
                             print(f"\n[Pipeline] Reached limit for Part {part_index}. Rotating file...")
                             # Close current chunk
                             await f_descriptor.close()
@@ -321,7 +340,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                                                          f"{filename}.{downloader.session_id}.kpart{part_index}")
                             # Open new chunk file and reset progress tracker
                             f_descriptor = await aiofiles.open(part_filepath, "wb")
-                            tracker = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT, already_downloaded=0)
+                            speed_manager.download = ProgressTracker(total_size=settings.CHUNK_SIZE_LIMIT)
 
                 finally:
                     # Cleanly close the active file descriptor under any circumstances
@@ -329,7 +348,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
 
                 # Handle the final chunk after the stream hits EOF
                 if bytes_written_this_chunk > 0:
-                    tracker.display(force=True)
+                    speed_manager.display(force=True)
                     print(
                         f"\n[Pipeline] Stream EOF reached. Final Part {part_index} size: {bytes_written_this_chunk / (1024 * 1024):.2f} MB")
 
@@ -358,9 +377,10 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
 
 
 class TelegramUploader:
-    def __init__(self, bot: TelegramClient, target_chat: str | int):
+    def __init__(self, bot: TelegramClient, speed_manager: ProgressManager, target_chat: str | int):
         self.target_chat = target_chat
         self.bot = bot
+        self.speed_manager = speed_manager
 
     async def upload_file(self, file_path: str, caption: str, part_index: int) -> bool:
         """
@@ -375,15 +395,16 @@ class TelegramUploader:
 
         # Initialize the same ProgressTracker we used for downloading
         # For uploads, we specify a slightly larger window (5s) to smooth out MTProto upload bursts
-        tracker = ProgressTracker(total_size=file_size, window_seconds=5.0)
+        self.speed_manager.upload = ProgressTracker(total_size=file_size, window_seconds=5.0)
 
         print(f"[Uploader] Starting upload of Part {part_index} ({file_name})...")
 
         # Define the callback that Telethon calls periodically during upload
         def progress_callback(current_bytes, total_bytes):
-            delta = current_bytes - tracker.downloaded
-            tracker.update(delta)
-            tracker.display()
+            if isinstance(self.speed_manager.upload, NoneType): return
+            delta = current_bytes - self.speed_manager.upload.processed
+            self.speed_manager.upload.update(delta)
+            self.speed_manager.display()
 
         # Retry loop to handle FloodWaitError / network issues
         retries = 5
@@ -398,7 +419,7 @@ class TelegramUploader:
                     progress_callback=progress_callback
                 )
 
-                tracker.display(force=True)
+                self.speed_manager.display(force=True)
                 print(f"\n[Uploader] Successfully uploaded Part {part_index}!")
 
                 # Immediately clean up the disk space

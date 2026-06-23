@@ -67,6 +67,9 @@ class LocalFileProcessor(BaseSourceProcessor):
 
 
 class HttpProcessor(BaseSourceProcessor):
+    """
+    HttpProcessor
+    """
     def __init__(self, url: str, speed_manager, temp_dir: str = "./downloads"):
         super().__init__(speed_manager, temp_dir)
         self.url = url

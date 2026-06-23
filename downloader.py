@@ -322,6 +322,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                 if is_last_part:
                     # Dynamic check and safe append
                     upload_filepath, upload_idx = await append_metadata(part_filepath, part_index)
+                    part_index = upload_idx
                     caption = f"📦 Part {upload_idx} of `{filename}`\nSession ID: `{downloader.session_id}`"
                     await queue_upload(upload_filepath, caption, upload_idx)
                 else:
@@ -390,6 +391,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                     else:
                         # Dynamic check and safe append
                         upload_filepath, upload_idx = await append_metadata(part_filepath, part_index)
+                        part_index = upload_idx
                         caption = f"📦 Part {upload_idx} of `{filename}`\nSession ID: `{downloader.session_id}`"
                         await queue_upload(upload_filepath, caption, upload_idx)
                 else:

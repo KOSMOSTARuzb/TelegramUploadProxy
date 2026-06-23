@@ -79,7 +79,7 @@ class ProgressManager:
         if self.upload:
             parts.append(format_stream(self.upload, "UL"))
 
-        print(f"\r{' | '.join(parts)}", end="", flush=True)
+        print(f"\r\033[K{' | '.join(parts)}", end="", flush=True)
 
 class AsyncDownloader:
     def __init__(self, url: str, speed_manager: ProgressManager, temp_dir: str = "./downloads"):

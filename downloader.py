@@ -177,6 +177,7 @@ class AsyncDownloader:
 
                     # Force final print on successful completion to show 100%
                     self.speed_manager.display(force=True)
+                    self.speed_manager.download = None
                     print()  # Print a clean newline
                     return existing_bytes
 
@@ -321,6 +322,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                         # Once we reach the chunk limit, rotate to the next part
                         if bytes_written_this_chunk >= settings.CHUNK_SIZE_LIMIT:
                             speed_manager.display(force=True)
+                            speed_manager.download = None
                             print(f"\n[Pipeline] Reached limit for Part {part_index}. Rotating file...")
                             # Close current chunk
                             await f_descriptor.close()
@@ -349,6 +351,7 @@ async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):
                 # Handle the final chunk after the stream hits EOF
                 if bytes_written_this_chunk > 0:
                     speed_manager.display(force=True)
+                    speed_manager.download = None
                     print(
                         f"\n[Pipeline] Stream EOF reached. Final Part {part_index} size: {bytes_written_this_chunk / (1024 * 1024):.2f} MB")
 
@@ -421,6 +424,7 @@ class TelegramUploader:
 
                 self.speed_manager.display(force=True)
                 print(f"\n[Uploader] Successfully uploaded Part {part_index}!")
+                self.speed_manager.upload = None
 
                 # Immediately clean up the disk space
                 try:

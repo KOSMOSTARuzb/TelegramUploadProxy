@@ -188,21 +188,6 @@ class AsyncDownloader:
                 await asyncio.sleep(2.0)
 
 
-# --- Mock Upload Task (Same as before) ---
-async def mock_telegram_upload(file_path: str, part_index: int):
-    file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
-    print(f"[Uploader] Starting upload of Part {part_index} ({file_path}) - {file_size_mb:.2f} MB...")
-    simulated_upload_time = secrets.SystemRandom().uniform(4.0, 8.0)
-    await asyncio.sleep(simulated_upload_time)
-    print(f"[Uploader] Successfully uploaded Part {part_index}!")
-    try:
-        raise
-        os.remove(file_path)
-        print(f"[Uploader] Cleaned up: {file_path}")
-    except OSError as e:
-        print(f"[Uploader] Error deleting {file_path}: {e}")
-
-
 # --- Pipeline Coordination with Range-Support Intelligence ---
 # --- Real Pipeline Coordination ---
 async def run_pipeline(bot: TelegramClient, url: str, target_chat: int):

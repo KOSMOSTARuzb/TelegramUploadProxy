@@ -30,16 +30,16 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
 
     async def append_metadata(filepath: str, idx: int) -> Tuple[str, int]:
         """Appends metadata to the final file, safely rolling over to a new part if size limits are breached."""
-        def parse_metadata(_filename: str, session_id: str, size: int, extra = None) -> bytes:
+        def parse_metadata(session_id: str, parts_count: int) -> bytes:
             processor_metadata = processor.get_processor_metadata()
             metadata_str = json.dumps({
                 "session_id": session_id,
-                "total_parts": size,
+                "total_parts": parts_count,
                 **processor_metadata
             })
             return metadata_str.encode("utf-8")
 
-        metadata_bytes = parse_metadata(filepath, processor.session_id, idx)
+        metadata_bytes = parse_metadata(processor.session_id, idx)
         current_size = os.path.getsize(filepath)
         assert len(metadata_bytes) + 4 <= settings.CHUNK_SIZE_LIMIT, f"Extremely large metadata size: {len(metadata_bytes) + 4}"
 
@@ -55,7 +55,7 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
             new_idx = idx + 1
             new_filepath = os.path.join(processor.temp_dir, f"{filename}.{processor.session_id}.kpart{new_idx}")
 
-            new_meta_bytes = parse_metadata(filename, processor.session_id, new_idx)
+            new_meta_bytes = parse_metadata(processor.session_id, new_idx)
 
             async with aiofiles.open(new_filepath, "wb") as f:
                 await f.write(new_meta_bytes)

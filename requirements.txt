@@ -2,3 +2,4 @@ pydantic-settings
 Telethon
 httpx
 aiofiles
+libtorrent

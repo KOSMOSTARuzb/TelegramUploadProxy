@@ -13,8 +13,11 @@ class ProgressStream:
         self.history = deque()
         self.last_print_time = 0.0
 
-    def update(self, bytes_count: int):
-        self.processed += bytes_count
+    def update(self, bytes_count: int, increment: bool = True):
+        if increment:
+            self.processed += bytes_count
+        else:
+            self.processed = bytes_count
         now = time.monotonic()
         self.history.append((now, self.processed))
 

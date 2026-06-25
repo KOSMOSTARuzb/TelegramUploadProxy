@@ -10,7 +10,7 @@ import sys
 from progress_speed import ProgressSpeedManager
 
 bot = TelegramClient(session='anony', api_id=settings.API_ID, api_hash=settings.API_HASH).start(bot_token=settings.BOT_TOKEN)
-
+# TODO: Add \n before all print statements to prevent it to print in the same line as the progress manager.
 async def main():
     # Test with a file download
     test_url = sys.argv[1] if len(sys.argv)>1 else "http://aws.kosmostar.us.kg:8085/testfile.bin"

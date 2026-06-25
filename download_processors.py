@@ -3,7 +3,7 @@ import os
 import secrets
 import urllib.parse
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple, AsyncGenerator
+from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 
 import aiofiles
 import httpx
@@ -13,7 +13,8 @@ from progress_speed import ProgressStream
 
 class BaseSourceProcessor(ABC):
     """Abstract base class for all file sources (HTTP, Torrent, Local)."""
-    def __init__(self, speed_manager, temp_dir: str = "./downloads"):
+    def __init__(self, processor_type: str, speed_manager, temp_dir: str = "./downloads"):
+        self.processor_type = processor_type
         self.speed_manager = speed_manager
         self.temp_dir = temp_dir
         self.session_id = secrets.token_hex(6)
@@ -29,6 +30,15 @@ class BaseSourceProcessor(ABC):
         """
         Processes the source and yields ready-to-upload chunk files.
         Yields: (filepath, part_index, is_last_part)
+        """
+        pass
+
+    @abstractmethod
+    def get_processor_metadata(self) -> Dict[str, Any]:
+        """
+        Returns a dictionary of metadata fields specific to this processor type.
+        This dictionary can be appended to files, written to database logs,
+        or dynamically injected into Telegram upload captions.
         """
         pass
 
@@ -71,7 +81,7 @@ class HttpProcessor(BaseSourceProcessor):
     HttpProcessor
     """
     def __init__(self, url: str, speed_manager, temp_dir: str = "./downloads"):
-        super().__init__(speed_manager, temp_dir)
+        super().__init__("HttpProcessor", speed_manager, temp_dir)
         self.url = url
         self.client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
         self.supports_ranges = False
@@ -81,6 +91,14 @@ class HttpProcessor(BaseSourceProcessor):
 
     async def close(self):
         await self.client.aclose()
+
+    def get_processor_metadata(self) -> Dict[str, Any]:
+        """Returns HTTP-specific metadata fields."""
+        return {
+            "url": self.url,
+            "supports_ranges": self.supports_ranges,
+            "filename": self.filename,
+        }
 
     async def prepare(self) -> Tuple[str, Optional[int]]:
         """Inspects the server for filename, size, and range support."""

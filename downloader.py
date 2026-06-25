@@ -1,4 +1,5 @@
 import asyncio
+import json
 import os
 from typing import Tuple
 
@@ -29,9 +30,18 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
 
     async def append_metadata(filepath: str, idx: int) -> Tuple[str, int]:
         """Appends metadata to the final file, safely rolling over to a new part if size limits are breached."""
-        metadata_str = f'{{"filename": "{filename}", "session_id": "{processor.session_id}", "total_parts": {idx}}}'
-        metadata_bytes = metadata_str.encode("utf-8")
+        def parse_metadata(_filename: str, session_id: str, size: int, extra = None) -> bytes:
+            processor_metadata = processor.get_processor_metadata()
+            metadata_str = json.dumps({
+                "session_id": session_id,
+                "total_parts": size,
+                **processor_metadata
+            })
+            return metadata_str.encode("utf-8")
+
+        metadata_bytes = parse_metadata(filepath, processor.session_id, idx)
         current_size = os.path.getsize(filepath)
+        assert len(metadata_bytes) + 4 <= settings.CHUNK_SIZE_LIMIT, f"Extremely large metadata size: {len(metadata_bytes) + 4}"
 
         if current_size + len(metadata_bytes) + 4 <= settings.CHUNK_SIZE_LIMIT:
             async with aiofiles.open(filepath, "ab") as f:
@@ -45,8 +55,7 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
             new_idx = idx + 1
             new_filepath = os.path.join(processor.temp_dir, f"{filename}.{processor.session_id}.kpart{new_idx}")
 
-            metadata_str = f'{{"filename": "{filename}", "session_id": "{processor.session_id}", "total_parts": {new_idx}}}'
-            new_meta_bytes = metadata_str.encode("utf-8")
+            new_meta_bytes = parse_metadata(filename, processor.session_id, new_idx)
 
             async with aiofiles.open(new_filepath, "wb") as f:
                 await f.write(new_meta_bytes)
@@ -56,6 +65,7 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
 
     try:
         # Loop effortlessly over whatever chunks the processor provides
+        # noinspection PyTypeChecker
         async for part_filepath, part_index, is_last in processor.yield_chunks(settings.CHUNK_SIZE_LIMIT):
 
             if is_last and part_index == 1:

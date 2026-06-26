@@ -105,7 +105,7 @@ class TorrentProcessor(BaseSourceProcessor):
 
             self.speed_manager.download = ProgressStream(total_size=(end_byte - start_byte) + 1)
 
-            print(f"[TorrentProcessor] Downloading Part {part_index}; Pieces: {start_piece}-{end_piece} (Range: {start_byte}-{end_byte})...")
+            print(f"\n[TorrentProcessor] Downloading Part {part_index}; Pieces: {start_piece}-{end_piece} (Range: {start_byte}-{end_byte})...")
 
             def pre_allocate_kpart():
                 os.makedirs(os.path.dirname(part_filepath), exist_ok=True)
@@ -182,7 +182,7 @@ class TorrentProcessor(BaseSourceProcessor):
 
                 await asyncio.sleep(0.1)
 
-            print(f"[TorrentProcessor] Successfully assembled Part {part_index} at: {part_filepath}")
+            print(f"\n[TorrentProcessor] Successfully assembled Part {part_index} at: {part_filepath}")
 
             # Releasing the storage of libtorrent
             priorities = self.torrent_handle.get_piece_priorities()
@@ -204,21 +204,21 @@ class TorrentProcessor(BaseSourceProcessor):
                         try:
                             if os.path.isdir(item_path):
                                 shutil.rmtree(item_path)
-                                print(f"[TorrentProcessor] Deleted scratch folder: {item}")
+                                print(f"\n[TorrentProcessor] Deleted scratch folder: {item}")
                             else:
                                 os.remove(item_path)
-                                print(f"[TorrentProcessor] Deleted raw scratch file: {item}")
+                                print(f"\n[TorrentProcessor] Deleted raw scratch file: {item}")
                         except Exception as e:
                             # Fallback: if OS locks still prevent deletion, truncate file to 0 bytes
                             try:
                                 if os.path.isfile(item_path):
                                     with open(item_path, "wb") as f:
                                         f.truncate(0)
-                                    print(f"[TorrentProcessor] Truncated locked raw file: {item}")
+                                    print(f"\n[TorrentProcessor] Truncated locked raw file: {item}")
                                 else:
-                                    print(f"[TorrentProcessor] Exception while deleting: {item} > {e}")
+                                    print(f"\n[TorrentProcessor] Exception while deleting: {item} > {e}")
                             except Exception as ex:
-                                print(f"[TorrentProcessor] Could not wipe {item} yet: {ex}")
+                                print(f"\n[TorrentProcessor] Could not wipe {item} yet: {ex}")
 
             # Offload directory scanning and deletion to a background thread
             await asyncio.to_thread(wipe_raw_files_except_kparts)

@@ -13,7 +13,6 @@ bot = TelegramClient(session='anony', api_id=settings.API_ID, api_hash=settings.
 # TODO: Add \n before all print statements to prevent it to print in the same line as the progress manager.
 speed_manager = ProgressSpeedManager()
 queue_manager = PipelineQueueManager(bot)
-queue_manager.start()
 
 
 @bot.on(events.NewMessage)

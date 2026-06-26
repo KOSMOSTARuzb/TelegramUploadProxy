@@ -132,7 +132,8 @@ class TorrentProcessor(BaseSourceProcessor):
                 for p in target_pieces:
                     if p not in requested_pieces and self.torrent_handle.have_piece(p):
                         self.torrent_handle.read_piece(p)
-                        print(f'\n[TorrentProcessor] requested piece {p}({len(requested_pieces)})')
+                        if self.speed_manager.download and self.speed_manager.download.total_size == self.speed_manager.download.processed:
+                            print(f'\n[TorrentProcessor] requested piece {p}({len(requested_pieces)})')
                         requested_pieces.add(p)
 
                 # Process piece buffer arrivals
@@ -170,11 +171,27 @@ class TorrentProcessor(BaseSourceProcessor):
                                         f.write(data)
 
                                 await asyncio.to_thread(write_slice_to_kpart, part_filepath, kpart_offset, slice_bytes)
-                                print(f'\n[TorrentProcessor] wrote piece {p}({len(written_pieces)})')
+                                if self.speed_manager.download and self.speed_manager.download.total_size == self.speed_manager.download.processed:
+                                    print(f'\n[TorrentProcessor] wrote piece {p}({len(written_pieces)})')
 
                             written_pieces.add(p)
                             # Garbage collect the piece buffer from memory immediately
                             del piece_data
+
+                    # --- AUTO-RECOVERY FOR SEEDING READ ERRORS ---
+                    elif isinstance(alert, libtorrent.file_error_alert):
+                        msg = alert.message()
+
+                        # When libtorrent fails to read a deleted piece for a peer,
+                        # the error message will explicitly contain 'reading' or 'read'
+                        if "reading" in msg or "read" in msg:
+                            print(msg)
+                            print(f"\n[TorrentProcessor] Peer requested a deleted piece. Auto-resuming download...")
+                            self.torrent_handle.clear_error()
+                            self.torrent_handle.resume()
+                        else:
+                            # If it's a write error (e.g., Disk Full on current chunk), print the true error
+                            print(f"\n[TorrentProcessor] Disk Write/Access Error: {msg}")
 
                 # update the speed counter
                 status = self.torrent_handle.status()
@@ -191,8 +208,6 @@ class TorrentProcessor(BaseSourceProcessor):
             for p in target_pieces:
                 priorities[p] = 0
             self.torrent_handle.prioritize_pieces(priorities)
-            for p in target_pieces:
-                self.torrent_handle.dont_have(p)
 
             # Tell libtorrent to close its OS file handles for this torrent
             self.torrent_handle.flush_cache()

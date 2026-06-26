@@ -253,12 +253,28 @@ class TorrentProcessor(BaseSourceProcessor):
     def get_processor_metadata(self) -> Dict[str, Any]:
         file_index = []
         files_storage = self.torrent_info.files()
+        is_v2 = files_storage.v2()  # Check if this is a v2 or hybrid torrent
 
         for idx in range(files_storage.num_files()):
+            file_hash = None
+
+            if is_v2:
+                # Retrieve the SHA-256 Merkle root hash
+                root_hash = files_storage.root(idx)
+                # Convert to string and verify it's not a dummy zero-hash
+                if root_hash and str(root_hash) != "0000000000000000000000000000000000000000000000000000000000000000":
+                    file_hash = str(root_hash)
+            else:
+                # Retrieve the optional SHA-1 file hash
+                v1_hash = files_storage.hash(idx)
+                if v1_hash and str(v1_hash) != "0000000000000000000000000000000000000000":
+                    file_hash = str(v1_hash)
+
             file_index.append({
                 "path": files_storage.file_path(idx),
                 "size": files_storage.file_size(idx),
-                "is_pad": files_storage.pad_file_at(idx)
+                "is_pad": files_storage.pad_file_at(idx),
+                "hash": file_hash  # Hexadecimal string or None
             })
 
         return {

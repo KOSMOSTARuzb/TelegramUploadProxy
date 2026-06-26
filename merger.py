@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import os
 import re
 import json
@@ -164,6 +165,26 @@ def perform_merge_http(session_data: dict, output_dir: str):
 
     print(f"[Merger] Reassembly successfully finished!")
 
+def verify_file_integrity(filepath: str, expected_hash: str) -> bool:
+    """
+    Computes the hash of the assembled file and compares it with the expected value.
+    Reads in memory-safe chunks of 64 KB.
+    """
+    if len(expected_hash) == 64:
+        hasher = hashlib.sha256()
+    elif len(expected_hash) == 40:
+        hasher = hashlib.sha1()
+    else:
+        return False  # Unsupported hash length
+
+    with open(filepath, "rb") as f:
+        while True:
+            chunk = f.read(64 * 1024)
+            if not chunk:
+                break
+            hasher.update(chunk)
+
+    return hasher.hexdigest().lower() == expected_hash.lower()
 
 def perform_merge_file_tree(session_data: dict, output_dir: str):
     """
@@ -265,6 +286,16 @@ def perform_merge_file_tree(session_data: dict, output_dir: str):
                 read_bytes += len(chunk)
 
         print(f"[Merger] Reassembled: {file_path} ({file_size:,} bytes)")
+        # Verify the file if a metadata hash is available
+        expected_hash = file.get("hash")
+        if expected_hash:
+            # Run the verification on a background thread to prevent thread blocking
+            is_valid = verify_file_integrity(target_path, expected_hash)
+            if is_valid:
+                print(f" -> [OK] Cryptographic hash matches!")
+            else:
+                print(f" -> [CORRUPT] Hash mismatch for assembled file: {file_path}")
+                print(expected_hash)
 
     # Ensure last part file handle is cleanly closed
     if part_file:

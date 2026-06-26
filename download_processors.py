@@ -1,9 +1,11 @@
 import asyncio
+import hashlib
 import os
 import secrets
 import shutil
 import urllib.parse
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 
 import aiofiles
@@ -189,7 +191,7 @@ class TorrentProcessor(BaseSourceProcessor):
                         # When libtorrent fails to read a deleted piece for a peer,
                         # the error message will explicitly contain 'reading' or 'read'
                         if "reading" in msg or "read" in msg or 'file_open' in msg:
-                            print(f"\n[TorrentProcessor] Peer requested a deleted piece. Auto-resuming download...")
+                            # print(f"\n[TorrentProcessor] Peer requested a deleted piece. Auto-resuming download...")
                             self.torrent_handle.clear_error()
                             self.torrent_handle.resume()
                         else:
@@ -288,13 +290,154 @@ class TorrentProcessor(BaseSourceProcessor):
 
 
 class LocalFileProcessor(BaseSourceProcessor):
+    """
+    Torrents
+    """
+    def __init__(self, path: str, speed_manager, temp_dir: str = "./downloads"):
+        super().__init__("LocalFileProcessor", speed_manager, temp_dir)
+        self.name = ""
+        self.path = path
+        if not os.path.exists(self.path):
+            raise FileNotFoundError(f"\n[LocalFileProcessor] Path does not exist: {self.path}")
+        self.files = self._get_path_info()
+
+    def _get_path_info(self):
+        if os.path.isfile(self.path):
+            return [self._get_file_info(self.path)]
+
+        file_list = []
+        # Walk through the directory
+        for root, dirs, files in os.walk(self.path):
+            for file in files:
+                full_path = os.path.join(root, file)
+                file_list.append(self._get_file_info(full_path))
+        return file_list
+
+    def _get_file_info(self, full_path):
+        # Calculate relative path
+        relative_path = os.path.relpath(full_path, self.path)
+
+        # Get file size
+        size = os.path.getsize(full_path)
+
+        # Calculate SHA256 hash
+        sha256_hash = hashlib.sha256()
+        try:
+            with open(full_path, "rb") as f:
+                # Read in chunks to handle large files efficiently
+                for byte_block in iter(lambda: f.read(4096), b""):
+                    sha256_hash.update(byte_block)
+            file_hash = sha256_hash.hexdigest()
+        except (PermissionError, OSError):
+            file_hash = "ERROR_READING_FILE"
+        return {
+            "path": relative_path,
+            "size": size,
+            "hash": file_hash
+        }
+
     async def prepare(self):
-        # TODO: Read local os.path.getsize()
-        return "local_video.mp4", 5000000
+        total_size = 0
+        for file in self.files:
+            total_size += file['size']
+        self.name = os.path.basename(self.path.strip('/'))
+        return self.name, total_size
 
     async def yield_chunks(self, chunk_size_limit: int):
-        # TODO: Split local file and yield chunks
-        pass
+        total_size = sum(file['size'] for file in self.files)
+        os.makedirs(self.temp_dir, exist_ok=True)
+
+        # Edge Case: The source contains no files or only 0-byte files
+        if total_size == 0:
+            part_filepath = os.path.join(self.temp_dir, f"{self.name}.{self.session_id}.kpart1")
+            # Create an empty file
+            await asyncio.to_thread(lambda: open(part_filepath, "wb").close())
+            yield part_filepath, 1, True
+            return
+
+        total_written_bytes = 0
+        part_index = 1
+        bytes_written_in_current_part = 0
+        part_filepath = os.path.join(self.temp_dir, f"{self.name}.{self.session_id}.kpart{part_index}")
+
+        # Open the first part file asynchronously
+        part_f = await asyncio.to_thread(open, part_filepath, "wb")
+        buffer_size = 64 * 1024  # Read/write in efficient 64KB increments
+
+        try:
+            for file in self.files:
+                file_path = os.path.join(self.path, file['path'])
+                file_size = file['size']
+
+                # Skip empty/pad files since they don't contribute bytes to the virtual stream
+                if file_size == 0:
+                    continue
+
+                # Open the source file safely
+                in_f = await asyncio.to_thread(open, file_path, "rb")
+                try:
+                    bytes_read_from_file = 0
+                    while bytes_read_from_file < file_size:
+                        # Determine boundaries
+                        space_left_in_part = chunk_size_limit - bytes_written_in_current_part
+                        left_in_file = file_size - bytes_read_from_file
+
+                        to_read = min(buffer_size, space_left_in_part, left_in_file)
+
+                        # Read and write on worker threads to avoid blocking the event loop
+                        chunk = await asyncio.to_thread(in_f.read, to_read)
+                        if not chunk:
+                            break  # Unexpected early EOF
+
+                        await asyncio.to_thread(part_f.write, chunk)
+
+                        bytes_read_from_file += len(chunk)
+                        bytes_written_in_current_part += len(chunk)
+                        total_written_bytes += len(chunk)
+
+                        # Check if our current .kpart file is full
+                        if bytes_written_in_current_part >= chunk_size_limit:
+                            await asyncio.to_thread(part_f.close)
+
+                            is_last_part = (total_written_bytes >= total_size)
+                            yield part_filepath, part_index, is_last_part
+
+                            if is_last_part:
+                                break
+
+                            # Set up the next kpart file
+                            part_index += 1
+                            bytes_written_in_current_part = 0
+                            part_filepath = os.path.join(
+                                self.temp_dir,
+                                f"{self.name}.{self.session_id}.kpart{part_index}"
+                            )
+                            part_f = await asyncio.to_thread(open, part_filepath, "wb")
+
+                    # Break the outer loop if we've successfully written everything
+                    if total_written_bytes >= total_size:
+                        break
+
+                finally:
+                    await asyncio.to_thread(in_f.close)
+
+            # Close the last part file if it contains residual bytes and is still open
+            if part_f and not getattr(part_f, 'closed', True):
+                await asyncio.to_thread(part_f.close)
+                yield part_filepath, part_index, True
+
+        except Exception as e:
+            # Ensure file descriptors are cleaned up in case of a pipeline crash
+            if part_f and not getattr(part_f, 'closed', True):
+                await asyncio.to_thread(part_f.close)
+            raise e
+
+    def get_processor_metadata(self) -> Dict[str, Any]:
+        return {
+            "root_path": self.path,
+            "name": self.name,
+            "file_index": self.files,
+        }
 
     async def close(self):
         pass

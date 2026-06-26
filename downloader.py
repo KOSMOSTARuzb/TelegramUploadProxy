@@ -69,7 +69,7 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
         # noinspection PyTypeChecker
         async for part_filepath, part_index, is_last in processor.yield_chunks(settings.CHUNK_SIZE_LIMIT):
 
-            if is_last and part_index == 1:
+            if is_last and part_index == 1 and processor.processor_type == "HttpProcessor":
                 # Single-part file: Rename to original and upload directly
                 final_path = os.path.join(processor.temp_dir, filename)
                 os.rename(part_filepath, final_path)

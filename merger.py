@@ -425,7 +425,7 @@ def main():
     selected_session = sessions[selected_session_id]
     if selected_session["processor_type"] == "httpprocessor":
         perform_merge_http(selected_session, output_dir)
-    elif selected_session["processor_type"] == "torrentprocessor":
+    elif selected_session["processor_type"] == "torrentprocessor" or selected_session["processor_type"] == "localfileprocessor":
         perform_merge_file_tree(selected_session, output_dir)
     else:
         raise ValueError(f"Unknown processor type: {selected_session['processor_type']}")

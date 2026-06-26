@@ -77,12 +77,21 @@ class SessionVerifier:
                 meta_bytes = f.read(meta_len)
                 metadata = json.loads(meta_bytes.decode("utf-8"))
 
+                required_fields = [
+                    "processor_type", "total_parts"
+                ]
+                if "processor_type" in metadata:
+                    data['processor_type']: str = metadata['processor_type'].lower()
+                    if data['processor_type'] == 'torrentprocessor':
+                        required_fields.append("file_index")
+
                 # Check required fields
-                if "filename" not in metadata or "total_parts" not in metadata:
+                if not all(field in metadata for field in required_fields):
                     raise KeyError("Required metadata key is missing.")
 
+
                 data["metadata"] = metadata
-                data["original_filename"] = metadata["filename"]
+                data["original_filename"] = metadata["filename"] if 'filename' in metadata else metadata['name']
                 data["metadata_len"] = meta_len
                 total_parts_expected = int(metadata["total_parts"])
 
@@ -110,7 +119,7 @@ class SessionVerifier:
             return
 
 
-def perform_merge(session_data: dict, output_dir: str):
+def perform_merge_http(session_data: dict, output_dir: str):
     """
     Sequentially stitches chunks together, stripping metadata safely from the final part.
     """
@@ -152,6 +161,114 @@ def perform_merge(session_data: dict, output_dir: str):
                         out_f.write(chunk)
                         written += len(chunk)
             print(" Done")
+
+    print(f"[Merger] Reassembly successfully finished!")
+
+
+def perform_merge_file_tree(session_data: dict, output_dir: str):
+    """
+    Sequentially stitches chunks together, stripping metadata safely from the final part.
+    """
+    original_name = session_data["original_filename"]
+    out_filepath = os.path.join(output_dir, original_name)
+    parts = session_data["parts_found"]
+    total_parts = session_data["metadata"]["total_parts"]
+    metadata_len = session_data["metadata_len"]
+
+    print(f"\n[Merger] Stitching directory: {original_name}")
+    print(f"[Merger] Destination: {out_filepath}")
+
+    buffer_size = 10 * 1024 * 1024  # 10 MB RAM buffer for high-speed local merging
+
+    # --- 2. Initialize Stream State (Persists across the entire file tree) ---
+    part_idx = 1
+    part_file = None
+    part_bytes_remaining = 0
+
+    def open_next_part():
+        nonlocal part_idx, part_file, part_bytes_remaining
+        if part_file:
+            part_file.close()
+
+        if part_idx <= total_parts:
+            part_path = parts[part_idx]
+            part_file = open(part_path, "rb")
+            part_size = os.path.getsize(part_path)
+
+            # If we are on the final part, strip the trailing metadata safely
+            if part_idx == total_parts:
+                part_bytes_remaining = max(0, part_size - metadata_len)
+            else:
+                part_bytes_remaining = part_size
+
+            part_idx += 1
+        else:
+            part_file = None
+            part_bytes_remaining = 0
+
+    # Open the first part to prime the stream
+    open_next_part()
+
+    def read_chunk_from_stream(n: int) -> bytes:
+        """
+        Reads up to n bytes from the contiguous stream of parts.
+        Transitions to the next part automatically.
+        """
+        nonlocal part_file, part_bytes_remaining
+        if not part_file:
+            return b""
+
+        # If the current part has been exhausted, move to the next kpart
+        if part_bytes_remaining <= 0:
+            open_next_part()
+            if not part_file:
+                return b""
+
+        to_read = min(n, part_bytes_remaining)
+        chunk = part_file.read(to_read)
+        if chunk:
+            part_bytes_remaining -= len(chunk)
+        return chunk
+
+    # --- 3. Process each file in the index sequentially ---
+    for file in session_data["metadata"]["file_index"]:
+        file_path: str = str(file.get("path"))
+        file_size: int = int(file.get("size") or 0)
+        is_file_pad: bool = file.get("is_pad", False)
+
+        target_path = os.path.join(out_filepath, file_path)
+
+        # CASE A: Skip pad files sequentially in the binary stream
+        if is_file_pad:
+            read_bytes = 0
+            while read_bytes < file_size:
+                to_read = min(buffer_size, file_size - read_bytes)
+                chunk = read_chunk_from_stream(to_read)
+                if not chunk:
+                    break
+                read_bytes += len(chunk)
+            print(f"[Merger] Skipped pad file: {file_path} ({file_size:,} bytes)")
+            continue
+
+        # CASE B: Reassemble payload files
+        os.makedirs(os.path.dirname(target_path), exist_ok=True)
+        read_bytes = 0
+
+        with open(target_path, "wb") as out_f:
+            while read_bytes < file_size:
+                # Read in memory-safe increments (buffer_size or whatever is left of the file)
+                to_read = min(buffer_size, file_size - read_bytes)
+                chunk = read_chunk_from_stream(to_read)
+                if not chunk:
+                    break  # Safety break for early EOF
+                out_f.write(chunk)
+                read_bytes += len(chunk)
+
+        print(f"[Merger] Reassembled: {file_path} ({file_size:,} bytes)")
+
+    # Ensure last part file handle is cleanly closed
+    if part_file:
+        part_file.close()
 
     print(f"[Merger] Reassembly successfully finished!")
 
@@ -272,8 +389,15 @@ def main():
             # Multi-session or errors present. Prompt user interactive choice.
             selected_session_id = run_interactive_selection(sessions)
 
-    if selected_session_id:
-        perform_merge(sessions[selected_session_id], output_dir)
+    if not selected_session_id:
+        return
+    selected_session = sessions[selected_session_id]
+    if selected_session["processor_type"] == "httpprocessor":
+        perform_merge_http(selected_session, output_dir)
+    elif selected_session["processor_type"] == "torrentprocessor":
+        perform_merge_file_tree(selected_session, output_dir)
+    else:
+        raise ValueError(f"Unknown processor type: {selected_session['processor_type']}")
 
 
 if __name__ == "__main__":

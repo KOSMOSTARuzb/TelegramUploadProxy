@@ -9,6 +9,9 @@ from typing import Optional, Tuple, AsyncGenerator, Dict, Any
 import aiofiles
 import httpx
 import libtorrent
+from pathvalidate import sanitize_filename
+# noinspection PyProtectedMember
+from pathvalidate._filename import _DEFAULT_MAX_FILENAME_LEN
 
 from progress_speed import ProgressStream
 
@@ -94,7 +97,8 @@ class TorrentProcessor(BaseSourceProcessor):
         piece_length = self.torrent_info.piece_length()
 
         while total_bytes < self.torrent_total_size:
-            part_filepath = os.path.join(self.temp_dir, f"{self.session_id}.kpart{part_index}")
+            _filename_last_part = f".{self.session_id}.kpart{part_index}"
+            part_filepath = os.path.join(self.temp_dir, sanitize_filename(f"{self.torrent_info.name()}", max_len=_DEFAULT_MAX_FILENAME_LEN-len(_filename_last_part))+_filename_last_part)
             start_byte = total_bytes
             end_byte = min(start_byte + chunk_size_limit - 1, self.torrent_total_size - 1)
             chunk_len = end_byte - start_byte + 1
@@ -184,8 +188,7 @@ class TorrentProcessor(BaseSourceProcessor):
 
                         # When libtorrent fails to read a deleted piece for a peer,
                         # the error message will explicitly contain 'reading' or 'read'
-                        if "reading" in msg or "read" in msg:
-                            print(msg)
+                        if "reading" in msg or "read" in msg or 'file_open' in msg:
                             print(f"\n[TorrentProcessor] Peer requested a deleted piece. Auto-resuming download...")
                             self.torrent_handle.clear_error()
                             self.torrent_handle.resume()
@@ -202,6 +205,7 @@ class TorrentProcessor(BaseSourceProcessor):
                 await asyncio.sleep(0.1)
 
             print(f"\n[TorrentProcessor] Successfully assembled Part {part_index} at: {part_filepath}")
+            self.speed_manager.download = None
 
             # Releasing the storage of libtorrent
             priorities = self.torrent_handle.get_piece_priorities()
@@ -247,9 +251,20 @@ class TorrentProcessor(BaseSourceProcessor):
             part_index += 1
 
     def get_processor_metadata(self) -> Dict[str, Any]:
+        file_index = []
+        files_storage = self.torrent_info.files()
+
+        for idx in range(files_storage.num_files()):
+            file_index.append({
+                "path": files_storage.file_path(idx),
+                "size": files_storage.file_size(idx),
+                "is_pad": files_storage.pad_file_at(idx)
+            })
+
         return {
             "magnet_url": self.magnet_url,
             "name": self.torrent_info.name(),
+            "file_index": file_index,
         }
 
     async def close(self):

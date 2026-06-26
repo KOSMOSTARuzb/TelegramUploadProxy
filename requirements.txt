@@ -3,3 +3,4 @@ Telethon
 httpx
 aiofiles
 libtorrent
+pathvalidate

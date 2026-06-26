@@ -33,6 +33,7 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
         def parse_metadata(session_id: str, parts_count: int) -> bytes:
             processor_metadata = processor.get_processor_metadata()
             metadata_str = json.dumps({
+                "processor_type": processor.processor_type,
                 "session_id": session_id,
                 "total_parts": parts_count,
                 **processor_metadata

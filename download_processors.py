@@ -189,6 +189,8 @@ class TorrentProcessor(BaseSourceProcessor):
             for p in target_pieces:
                 priorities[p] = 0
             self.torrent_handle.prioritize_pieces(priorities)
+            for p in target_pieces:
+                self.torrent_handle.dont_have(p)
 
             # Tell libtorrent to close its OS file handles for this torrent
             self.torrent_handle.flush_cache()

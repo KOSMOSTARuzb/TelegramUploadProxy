@@ -273,7 +273,7 @@ class TorrentProcessor(BaseSourceProcessor):
             file_index.append({
                 "path": files_storage.file_path(idx),
                 "size": files_storage.file_size(idx),
-                "is_pad": files_storage.pad_file_at(idx),
+                "is_pad": bool(files_storage.file_flags(idx) & files_storage.flag_pad_file),
                 "hash": file_hash  # Hexadecimal string or None
             })
 

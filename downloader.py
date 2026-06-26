@@ -97,3 +97,103 @@ async def run_pipeline(bot: TelegramClient, processor: BaseSourceProcessor, targ
         print(f"\n[Pipeline Error] An error occurred: {e}")
     finally:
         await processor.close()
+
+
+class PipelineQueueManager:
+    def __init__(self, bot):
+        self.bot = bot
+        self.queue = asyncio.Queue()
+        self.active_tasks = {}  # Maps msg_id -> asyncio.Task
+        self.queued_items = {}  # Maps msg_id -> item_dict (for fast lookups)
+        self.current_msg_id = None  # Tracks the currently running task's message ID
+        self.worker_task = None
+
+    def start(self):
+        """Starts the sequential queue consumer task."""
+        self.worker_task = asyncio.create_task(self._worker())
+
+    async def add_to_queue(self, msg_id: int, chat_id: int, processor, event):
+        item = {
+            "msg_id": msg_id,
+            "chat_id": chat_id,
+            "processor": processor,
+            "event": event
+        }
+        self.queued_items[msg_id] = item
+        await self.queue.put(item)
+
+        # Notify the user of their queue position
+        pos = self.queue.qsize()
+        if pos > 0:
+            await self.bot.send_message(
+                chat_id,
+                f"⏳ Task added to queue. Queue Position: {pos}",
+                reply_to=msg_id
+            )
+
+    async def cancel_task(self, msg_id: int, chat_id: int) -> bool:
+        """Attempts to cancel a specific running task or remove a pending queue item."""
+        # 1. If it's currently running, cancel the asyncio Task
+        if msg_id in self.active_tasks:
+            task = self.active_tasks[msg_id]
+            task.cancel()  # Raises asyncio.CancelledError inside the task's execution
+            await self.bot.send_message(chat_id, "🛑 Active pipeline cancelled successfully.")
+            return True
+
+        # 2. If it's waiting in the queue, mark it as removed
+        if msg_id in self.queued_items:
+            del self.queued_items[msg_id]
+            await self.bot.send_message(chat_id, "🗑️ Pending task removed from the queue.")
+            return True
+
+        return False
+
+    async def cancel_active_task(self, chat_id: int) -> bool:
+        """Cancels whatever is currently running on the pipeline."""
+        if self.current_msg_id and self.current_msg_id in self.active_tasks:
+            return await self.cancel_task(self.current_msg_id, chat_id)
+
+        await self.bot.send_message(chat_id, "⚠️ No active task is currently running.")
+        return False
+
+    async def _worker(self):
+        """Sequential queue consumer loop."""
+        while True:
+            item = await self.queue.get()
+            msg_id = item["msg_id"]
+
+            # If the item was cancelled while sitting in the queue, skip it
+            if msg_id not in self.queued_items:
+                self.queue.task_done()
+                continue
+
+            # Remove from queue tracking list
+            del self.queued_items[msg_id]
+
+            self.current_msg_id = msg_id
+            chat_id = item["chat_id"]
+            processor = item["processor"]
+            event = item["event"]
+
+            # Create the pipeline execution coroutine
+            pipeline_coro = run_pipeline(
+                bot=self.bot,
+                processor=processor,
+                target_chat=chat_id
+            )
+
+            # Spawn and track the task
+            task = asyncio.create_task(pipeline_coro)
+            self.active_tasks[msg_id] = task
+
+            try:
+                await task
+            except asyncio.CancelledError:
+                print(f"[QueueManager] Task {msg_id} was successfully cancelled.")
+            except Exception as e:
+                await self.bot.send_message(chat_id, f"❌ Pipeline Exception: {e}")
+            finally:
+                # Cleanup tracking states
+                self.active_tasks.pop(msg_id, None)
+                self.current_msg_id = None
+                self.queue.task_done()

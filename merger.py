@@ -6,7 +6,7 @@ import json
 import shutil
 
 # Regex to match the kpart naming structure: [filename].[12-char-session-id].kpart[index]
-KPART_REGEX = re.compile(r"^(.*?)\.([a-f0-9A-Z]{12})\.kpart(\d+)$")
+KPART_REGEX = re.compile(r"^(.*?)([a-f0-9A-Z]{12})\.kpart(\d+)$")
 
 
 class SessionVerifier:

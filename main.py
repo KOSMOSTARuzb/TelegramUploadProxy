@@ -68,5 +68,16 @@ async def main(event: events.NewMessage.Event):
     # --- PUSH TASK TO SEQUENTIAL QUEUE ---
     await queue_manager.add_to_queue(event.message.id, chat_id, processor, event)
 
+
+async def start_app():
+    # This runs inside the active event loop, so asyncio.create_task() succeeds
+    queue_manager.start()
+    print("[Bot] Background queue worker started successfully.")
+
+    # Keep the bot running in the background
+    await bot.run_until_disconnected()
+
+
 with bot:
-    bot.run_until_disconnected()
+    # Use Telethon's loop to execute our async startup wrapper
+    bot.loop.run_until_complete(start_app())

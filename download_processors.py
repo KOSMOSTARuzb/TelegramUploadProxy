@@ -100,7 +100,7 @@ class TorrentProcessor(BaseSourceProcessor):
 
         while total_bytes < self.torrent_total_size:
             _filename_last_part = f".{self.session_id}.kpart{part_index}"
-            part_filepath = os.path.join(self.temp_dir, sanitize_filename(f"{self.torrent_info.name()}", max_len=_DEFAULT_MAX_FILENAME_LEN-len(_filename_last_part))+_filename_last_part)
+            part_filepath = os.path.join(self.temp_dir, str(sanitize_filename(f"{self.torrent_info.name()}", max_len=_DEFAULT_MAX_FILENAME_LEN-len(_filename_last_part)))+_filename_last_part)
             start_byte = total_bytes
             end_byte = min(start_byte + chunk_size_limit - 1, self.torrent_total_size - 1)
             chunk_len = end_byte - start_byte + 1

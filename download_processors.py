@@ -132,6 +132,7 @@ class TorrentProcessor(BaseSourceProcessor):
                 for p in target_pieces:
                     if p not in requested_pieces and self.torrent_handle.have_piece(p):
                         self.torrent_handle.read_piece(p)
+                        print(f'\n[TorrentProcessor] requested piece {p}({len(requested_pieces)})')
                         requested_pieces.add(p)
 
                 # Process piece buffer arrivals
@@ -169,6 +170,7 @@ class TorrentProcessor(BaseSourceProcessor):
                                         f.write(data)
 
                                 await asyncio.to_thread(write_slice_to_kpart, part_filepath, kpart_offset, slice_bytes)
+                                print(f'\n[TorrentProcessor] wrote piece {p}({len(written_pieces)})')
 
                             written_pieces.add(p)
                             # Garbage collect the piece buffer from memory immediately
@@ -197,7 +199,7 @@ class TorrentProcessor(BaseSourceProcessor):
 
             await asyncio.sleep(1)
 
-            def wipe_raw_files_except_kparts():
+            def wipe_raw_files():
                 if os.path.exists(self.save_path):
                     for item in os.listdir(self.save_path):
                         item_path = os.path.join(self.save_path, item)
@@ -221,7 +223,7 @@ class TorrentProcessor(BaseSourceProcessor):
                                 print(f"\n[TorrentProcessor] Could not wipe {item} yet: {ex}")
 
             # Offload directory scanning and deletion to a background thread
-            await asyncio.to_thread(wipe_raw_files_except_kparts)
+            await asyncio.to_thread(wipe_raw_files)
 
             yield part_filepath, part_index, is_last_part
 

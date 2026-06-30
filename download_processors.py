@@ -456,8 +456,44 @@ class HttpProcessor(BaseSourceProcessor):
     """
     def __init__(self, url: str, speed_manager, temp_dir: str = "./downloads"):
         super().__init__("HttpProcessor", speed_manager, temp_dir)
-        self.url = url
-        self.client = httpx.AsyncClient(follow_redirects=True, timeout=30.0)
+
+        # Hardcode the Google Takeout download URL from the curl command
+        self.url = (
+            "https://takeout-download.usercontent.google.com/download/"
+            "takeout-20260629T165836Z-3-001.zip?j=e21e1824-e16c-4823-a762-34334f644912"
+            "&i=0&user=841068456632&authuser=0"
+        )
+
+        # Hardcode the HTTP headers and cookies from the curl command
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'accept-language': 'en-US,en;q=0.9,uz;q=0.8,ru;q=0.7',
+            'priority': 'u=0, i',
+            'referer': 'https://takeout.google.com/',
+            'sec-ch-ua': '"Chromium";v="148", "Google Chrome";v="148", "Not/A)Brand";v="99"',
+            'sec-ch-ua-arch': '"x86"',
+            'sec-ch-ua-bitness': '"64"',
+            'sec-ch-ua-full-version-list': '"Chromium";v="148.0.7778.167", "Google Chrome";v="148.0.7778.167", "Not/A)Brand";v="99.0.0.0"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-model': '""',
+            'sec-ch-ua-platform': '"Linux"',
+            'sec-ch-ua-platform-version': '""',
+            'sec-ch-ua-wow64': '?0',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-site',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+            'x-browser-channel': 'stable',
+            'x-browser-copyright': 'Copyright 2026 Google LLC. All Rights Reserved.',
+            'x-browser-validation': 'eJd5Tw+MWpGUJD0D/pwqH9jwh9w=',
+            'x-browser-year': '2026',
+            'x-client-data': 'CJC2yQEIo7bJAQipncoBCO7kygEIkqHLAQiHoM0BCOzJlDAIxc+UMAj10ZQwCKbUlDA=',
+            'cookie': '__Secure-BUCKET=CJsC; SEARCH_SAMESITE=CgQIlaEB; AEC=AdJVEauvL4dIl7vbhitMxHt9j1ajSa_Ju22zKxYALnXHG48-iFCqYe4gfA; __Secure-1PSIDTS=sidts-CjEByojQU_i4r6g7WnCMqTDePqUqBYPtf0CUr_9TXta9OYyi_3HcFxscH_LAaPhuZjqiEAA; __Secure-3PSIDTS=sidts-CjEByojQU_i4r6g7WnCMqTDePqUqBYPtf0CUr_9TXta9OYyi_3HcFxscH_LAaPhuZjqiEAA; __Secure-STRP=ANmZwa2TGr9P0zYoEzXtT_aLNcYkkjmRCWOL5raEL4Fimc4sG6yF9deA0mEcEk5y2so06v7ivjFVBM4tNWROmpoUWEcq6BLa88m1; S=billing-ui-v3=pHtfDFISI3iyYJ1DEBejZaDtcZYUCrV5jVH8ufJZq0s:billing-ui-v3-efe=pHtfDFISI3iyYJ1DEBejZaDtcZYUCrV5jVH8ufJZq0s; NID=532=xFPFgTTtRM6dn41SbgtnpOYaNJqDMOmcGxpMOKn4Ps4NoZLgQwfoxmvbzSEiu-hoYGIjIqeRTSTiF8a-Ia-v9TpGi5inZE0gnKz1FV5PPbwkbC2QS4SsvNr6mpZKSGa2fzBsK4ihbbEnnIWpLflwTidT3ep7FyCxDPmNFHjilQUBVQzK7BhFwewY27BRYzgA0kPd5gto7HTg6EIhPl-wGm2SeXEOBhcHYMtj54sRsb4ov5fsq8FsBKPOiL1fbEy2mmF5F7f0yvrRrrhzREAAB8E21AWGuDPritiCo4yUN5eYmdWXmZvCoSKiFsJBoNHYit656-VKzF9XyBNLAyD15bLnXau47zHOiswRaf9-Tkvty4ZPsfYjTSmPOxDplcM75uNgYuf4P62JlPq4QU5QYI4UgBlXf2HJb4alXuAezoXmNtkD45YiazOykSRZNcmOUhdwhU5p1yNa9wmVrhsamXyGRgFC3EVGlh6W_FBrZUTe5YbPOY1Yj7tCPx8cS5LwZCxJ2wYOVdhnx3L1P6iPedOtzlPlkruuEPiEnd64bIYv0oDmP0LRRS6EP7oWN6R4p3jz47Mg-TaLP_AtqMpeGr8nYQmto2CkUkRoM5tnzWNUlIkd_LDXLHmy1gFmimq-PoDuJGo8RQ3ieKIasOHqS0Z2gzR-2VK7mYgtr2pWco9GM1jEOi52gdO-gVZBcn3HYdqI6n8I92Hqy627rYxmGzgJ9IO9IPgJDBW2XsAtIfyWnwq2Vd0Q1BUI9X2XLSOqIQJw-GDE6vD0l44ewdndyiwlJczGyC7C2ZuXNODvAzsa-3g_oU4deONOtVETut1BzRz8I76h0CweMxXGkYXHb472z0P47rciyWz5i-dsJ357I4kjNhmh2wcadCWmSvcUnO5P143m5siQQEUM-d1vA3yEn3p56vfP043Mgwxo-_5WqJEa_B8kOwdbn4p1jtv3C1Lrwa0D26M-6xxfO7gTSmd5NtIjUkdoAyN-T_EliBny8w9GaLNgt9muFUABYrEf2CAPORWFzIJmwXzbikfm0rrRmj4cGimjTH3femzjSwy6S7mdEJdwX6sWnlnf58dkbyO8JF7tSHOJg51Pw-K84B3o0aUkCVuVJSrVg5Pa8yvg7l6wlDytaNuBsPZZaPhTq_opR0oCXWt12ggoSWUtBAXS_Wlg9_iJzJDJaw4EJJVFCzk2CIXia1vFW_40UdkMUzwX6BNKmA-G_BJpYY9W_sYA2UD8gthjiS9u8sfUa7_uiy7grSxzfZwr1ZoYgh2neUz1CJR3C_BGE36j8vqFL8G6DS3jul0Zt-FXcoD8Aa5F4OnddC8ajzGGSIW4kP-graQ8ej3_h-C7W9H5ZrRA1Prl_S73ts0umXSgIdUWi2qw0eXLBjvBL17lmurJRdXntG0nDRWbKFIEYSjXRwC1qC5DyjjEiADbcLTPbgY15YdeCeIqIBlexJeidRwa3dKooZObOumfPXAtGWrCJvdbDoXRdLEmdxXmdOEnBa0sUU-V1EINixecWjmcvEU4MFzzQ50ZM2KpdbAkEs-7_lUJ9tlEG_U_qaYIOGlFuNYh6wB9ZBdyGcU-6RId92-vVCGt_bHw-ImgOOZVivqR_GjJ0OGN2NhZpzx0zO9HcEJGiQdFpbVaZJMPO6BN7t4acpXf4smCAs5Gif7v_kC_Je2RuRqkECHeNx7sRkIjh2sdqqr3PLJeLdjtqrC2igmxnRkLgps_qi3GqQJ-_LqXJodXDJam-7KONhj0bN3HCVivj5MduoqyeOlvFnbRce7ICzDioAX2xVGAKFciqQn0JsVQk_hYIWwKev1K3cbVb9QW1MH-3f7LWf1Al4P-zw_Xnb8n-rFykmYdg8MdlmukgK3E6FIUPHIxtXZsZ6B9JVkpF9hR-Jlrr9hdvCu8xdPeKnShf6ZMFr32tQq6b74bAi2IwrqiFSEgEvrp4OMiuOHAGg08POZq4MTLVryxk_VP3Q2La-4j55R4vCwKxoG8r8UIhHy96nKGA-yEYR8WFxMCZ4Tx_emRXigFjP_3xmjv8IQLapirC8nZ-jNAas8kBYntG9o447Ki88LO3x8dHqzLNYALiPgAu6ZxsAG0RtZV9YgwGEKkinH40owzPlbe447mOymc14uT4HtBtd4HzSLPNawh-XeNwKTX1UvSKwP4r4DHD7u0TW2azehf0mHKxKyzQPAR4vqcPiNiMMadsTqcptLf16KNoZgb96q_PnhsPbeC13ivBPzjIy9tozrnVU_hEXgKWbvjT_DmkmFgdO18sQvgsFI7J9t1z2fboF6bUeVkVzBr5X6162tbIo8yhppzUDSox-uCl2IVnIzNr9EYZHK0DPXEOiIdqaSkXJYedFSmnJfyNDNUVcj_B3Ch7tbWuGXuQGL-CcWlHQj5Zz9OjDnL9Q; SID=g.a000_gi4KhvXMgPggZGn0bsgzQy3WdOfyOQi7EgjB8VDPS3zrTK40_uihaAqviowPJANy0JYkwACgYKAXQSARcSFQHGX2MiOkrr4VA4_tbuDUCkT2gRxhoVAUF8yKpln0iDTKvTL4ACfAna_Gi70076; __Secure-1PSID=g.a000_gi4KhvXMgPggZGn0bsgzQy3WdOfyOQi7EgjB8VDPS3zrTK4Bx8HjlRwz0z3wT_v_Gc_NgACgYKAbcSARcSFQHGX2Miqx-f4R0TnUIzM55yWLOjehoVAUF8yKoK0i-IGtasHL4sTlD7QG8U0076; __Secure-3PSID=g.a000_gi4KhvXMgPggZGn0bsgzQy3WdOfyOQi7EgjB8VDPS3zrTK4VuHy3R-H98HylwNCOp3tBAACgYKAQQSARcSFQHGX2MilbWykbpW4Wp5Kyeq3LZbLxoVAUF8yKopPQLOYQTqpVNjo2XVZ08w0076; HSID=A3vEgXbdrNxyi1DAi; SSID=ACdhUVkokfHVxBEPD; APISID=XmfGzMLOJv06d3Iw/A0h5ZnzvrzNODH-RL; SAPISID=wVHE4IykvQP-9bKy/AlDykRea-Dv8Y-c9h; __Secure-1PAPISID=wVHE4IykvQP-9bKy/AlDykRea-Dv8Y-c9h; __Secure-3PAPISID=wVHE4IykvQP-9bKy/AlDykRea-Dv8Y-c9h; SIDCC=AKEyXzXrv5HdTiYRwtbmAbbq6u4nBNd-WLP1D6YIwwqIiT6ZRFj8NP7j1mcbpMdZ5fS3we2mNaJT; __Secure-1PSIDCC=AKEyXzWSC_u1vc56kK4TT9hK-p2vnK8yU0nSSG0zvJ34RhPWcDCZGWFhuBfHcmqKszUojwN0des; __Secure-3PSIDCC=AKEyXzVpeLHan3uaPP7tIlOS8IH7CCM8zMN3ziX-FFYkaU1J3Xgv7GX1HNYtaAHHYe_2rm7_xEM'
+        }
+
+        # Configure the HTTP client to use these default headers for all subsequent requests
+        self.client = httpx.AsyncClient(headers=headers, follow_redirects=True, timeout=30.0)
         self.supports_ranges = False
         self.filename = None
         self.total_size = None

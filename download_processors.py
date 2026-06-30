@@ -299,10 +299,16 @@ class LocalFileProcessor(BaseSourceProcessor):
         self.path = path
         if not os.path.exists(self.path):
             raise FileNotFoundError(f"\n[LocalFileProcessor] Path does not exist: {self.path}")
+
+        # Determine if the target is a file or a directory
+        self.is_file = os.path.isfile(self.path)
+        # Use the parent directory if path is a file, otherwise use the path itself
+        self.base_dir = os.path.dirname(self.path) if self.is_file else self.path
+
         self.files = self._get_path_info()
 
     def _get_path_info(self):
-        if os.path.isfile(self.path):
+        if self.is_file:
             return [self._get_file_info(self.path)]
 
         file_list = []
@@ -314,8 +320,8 @@ class LocalFileProcessor(BaseSourceProcessor):
         return file_list
 
     def _get_file_info(self, full_path):
-        # Calculate relative path
-        relative_path = os.path.relpath(full_path, self.path)
+        # Calculate relative path with respect to the base directory
+        relative_path = os.path.relpath(full_path, self.base_dir)
 
         # Get file size
         size = os.path.getsize(full_path)
@@ -366,7 +372,8 @@ class LocalFileProcessor(BaseSourceProcessor):
 
         try:
             for file in self.files:
-                file_path = os.path.join(self.path, file['path'])
+                # Reconstruct full path using base_dir instead of path
+                file_path = os.path.join(self.base_dir, file['path'])
                 file_size = file['size']
 
                 # Skip empty/pad files since they don't contribute bytes to the virtual stream

@@ -518,20 +518,18 @@ class HttpProcessor(BaseSourceProcessor):
         try:
             print('[HttpProcessor] Inspecting headers...')
 
-            # Force target properties to guarantee HTTP ranges are evaluated
             self.supports_ranges = True
             self.total_size = 33432001557
             self.filename = "takeout-20260629T165836Z-3-001.zip"
 
-            # Connect to server to parse actual metadata dynamically if available
             response = await self.client.head(self.url)
 
-            # 1. Parse Filename
+            # Parse Filename
             content_disp = response.headers.get("content-disposition", "")
             if "filename=" in content_disp:
                 self.filename = content_disp.split("filename=")[1].strip('"\'')
 
-            # 2. Parse Size
+            # Parse Size
             content_length = response.headers.get("content-length")
             if content_length:
                 self.total_size = int(content_length)
@@ -545,28 +543,43 @@ class HttpProcessor(BaseSourceProcessor):
         return self.filename, self.total_size
 
     async def _download_range(self, filepath: str, start: int, end: int) -> Optional[int]:
-        """Internal helper for robust range downloading."""
-
+        """Internal helper for robust range downloading with automatic disconnect resilience."""
+        expected_size = (end - start) + 1
 
         # Check if we already have a partial file from a previous interrupted attempt
         existing_bytes = 0
         if os.path.exists(filepath):
             existing_bytes = os.path.getsize(filepath)
-            print(f"[HttpProcessor] Found partial file. Resuming from byte {start + existing_bytes}...")
 
-        current_start = start + existing_bytes
-        if current_start >= end:
+            # Truncation check to ensure byte boundaries are strictly aligned
+            if existing_bytes > expected_size:
+                print(
+                    f"[HttpProcessor] Partial file is larger than expected size ({existing_bytes} > {expected_size}). Truncating to {expected_size}...")
+                with open(filepath, "r+b") as f:
+                    f.truncate(expected_size)
+                existing_bytes = expected_size
+
+            print(
+                f"[HttpProcessor] Found partial file ({existing_bytes / (1024 * 1024):.2f} MB). Resuming from byte {start + existing_bytes}...")
+
+        if existing_bytes >= expected_size:
             return existing_bytes
 
-        self.speed_manager.download = ProgressStream(total_size=(end - start) + 1)
+        self.speed_manager.download = ProgressStream(total_size=expected_size)
         self.speed_manager.download.update(existing_bytes)
 
-        retries = 3
-        for attempt in range(retries):
+        retries = 15  # generous retries for network drops
+        attempt = 0
+
+        # Maintain loop until the local part is fully downloaded to its exact size
+        while existing_bytes < expected_size and attempt < retries:
+            current_start = start + existing_bytes
             try:
                 async with self.client.stream("GET", self.url,
                                               headers={"Range": f"bytes={current_start}-{end}"}) as response:
-                    response.raise_for_status()
+                    if response.status_code not in (200, 206):
+                        response.raise_for_status()
+
                     async with aiofiles.open(filepath, "ab") as f:
                         async for chunk in response.aiter_bytes(chunk_size=self.buffer_size):
                             await f.write(chunk)
@@ -575,18 +588,26 @@ class HttpProcessor(BaseSourceProcessor):
                                 self.speed_manager.download.update(len(chunk))
                                 self.speed_manager.display()
 
-                    self.speed_manager.display(force=True)
-                    self.speed_manager.download = None
-                    print()
-                    return existing_bytes
+                # Treat clean premature EOF as a transient drop, then retry.
+                if existing_bytes < expected_size:
+                    print(
+                        f"\n[HttpProcessor] Stream completed prematurely ({existing_bytes}/{expected_size} bytes). Reconnecting...")
+                    attempt += 1
+                    await asyncio.sleep(2.0)
+                else:
+                    break
+
             except Exception as e:
-                print(f"[HttpProcessor] Issue on attempt {attempt + 1}/{retries}: {e}")
-                if attempt == retries - 1:
+                print(f"\n[HttpProcessor] Issue on download attempt {attempt + 1}/{retries}: {e}")
+                attempt += 1
+                if attempt >= retries:
                     raise
                 await asyncio.sleep(2.0)
-                if attempt == 2: raise
-                await asyncio.sleep(2.0)
-        return None
+
+        self.speed_manager.display(force=True)
+        self.speed_manager.download = None
+        print()
+        return existing_bytes
 
     async def yield_chunks(self, chunk_size_limit: int) -> AsyncGenerator[Tuple[str, int, bool], None]:
         """Encapsulates both Range-supported and Streaming downloads."""
@@ -595,7 +616,6 @@ class HttpProcessor(BaseSourceProcessor):
         if self.supports_ranges and self.total_size:
 
             # Scan local folder to find the lowest incomplete/existing part number.
-            # This allows skipping already uploaded/deleted parts upon script restart.
             start_part_index = 1
             existing_parts = []
             if os.path.exists(self.temp_dir):
@@ -627,7 +647,8 @@ class HttpProcessor(BaseSourceProcessor):
                     continue
 
                 print(f"[HttpProcessor] Downloading Part {part_index} (Range: {start_byte}-{end_byte})...")
-                total_bytes += await self._download_range(part_filepath, start_byte, end_byte)
+                downloaded_bytes = await self._download_range(part_filepath, start_byte, end_byte)
+                total_bytes += downloaded_bytes
 
                 yield part_filepath, part_index, is_last_part
                 part_index += 1
